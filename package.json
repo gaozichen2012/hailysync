@@ -1,0 +1,22 @@
+{
+  "name": "obsidian-sync-plugin",
+  "version": "0.1.0",
+  "description": "Obsidian 插件：设置与 UI，调用 sync-core 执行同步",
+  "main": "main.js",
+  "scripts": {
+    "build": "esbuild main.ts --bundle --platform=node --format=cjs --outfile=main.js --external:obsidian",
+    "dev": "esbuild main.ts --bundle --platform=node --format=cjs --outfile=main.js --external:obsidian --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "sync-core": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.2",
+    "obsidian": "https://github.com/obsidianmd/obsidian-api/tarball/master",
+    "typescript": "^5.7.2"
+  }
+}
