@@ -1,6 +1,6 @@
 {
   "name": "obsidian-sync-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Obsidian 插件：设置与 UI，调用 sync-core 执行同步",
   "main": "main.js",
   "scripts": {
@@ -11,7 +11,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "sync-core": "^1.0.0"
+    "sync-core": "^1.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
