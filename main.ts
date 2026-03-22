@@ -190,8 +190,25 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   /** GET /files → 与本地 meta 同结构的 path → 条目映射（数组响应必先转为 map） */
   async fetchRemoteFiles(): Promise<SyncMetaMap> {
-    const res = await axios.get(`${this.baseUrl}/files`, { responseType: 'json' });
-    const data = res.data as unknown;
+    const res = await axios.get(this.baseUrl + '/files', { responseType: 'text' });
+    const raw = res.data as unknown;
+
+    console.log('RAW /files response:', raw);
+
+    let data: unknown = raw;
+    if (typeof data === 'string') {
+      const s = data.trim();
+      if (s === '') {
+        data = [];
+      } else {
+        try {
+          data = JSON.parse(s) as unknown;
+        } catch (e) {
+          console.error('JSON parse failed:', e);
+          data = [];
+        }
+      }
+    }
 
     const list = extractRemoteFilesArray(data);
     if (list) {
@@ -215,6 +232,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       const empty: SyncMetaMap = {};
+      console.error('/files 解析后无法得到文件列表或对象映射:', data);
       console.log('remoteFiles map:', empty);
       return empty;
     }

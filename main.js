@@ -15012,8 +15012,23 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   /** GET /files → 与本地 meta 同结构的 path → 条目映射（数组响应必先转为 map） */
   async fetchRemoteFiles() {
-    const res = await axios_default.get(`${this.baseUrl}/files`, { responseType: "json" });
-    const data = res.data;
+    const res = await axios_default.get(this.baseUrl + "/files", { responseType: "text" });
+    const raw = res.data;
+    console.log("RAW /files response:", raw);
+    let data = raw;
+    if (typeof data === "string") {
+      const s = data.trim();
+      if (s === "") {
+        data = [];
+      } else {
+        try {
+          data = JSON.parse(s);
+        } catch (e) {
+          console.error("JSON parse failed:", e);
+          data = [];
+        }
+      }
+    }
     const list = extractRemoteFilesArray(data);
     if (list) {
       const remoteFiles2 = {};
@@ -15035,6 +15050,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     }
     if (!data || typeof data !== "object" || Array.isArray(data)) {
       const empty = {};
+      console.error("/files \u89E3\u6790\u540E\u65E0\u6CD5\u5F97\u5230\u6587\u4EF6\u5217\u8868\u6216\u5BF9\u8C61\u6620\u5C04:", data);
       console.log("remoteFiles map:", empty);
       return empty;
     }
