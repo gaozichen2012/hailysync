@@ -54,7 +54,7 @@ function shouldSync(filePath: string): boolean {
 function normalizeRemoteMap(raw: SyncMetaMap): SyncMetaMap {
   const out: SyncMetaMap = {};
   for (const [k, v] of Object.entries(raw)) {
-    if (!v || typeof v !== 'object') continue;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
     const path = normalizeVaultPath(k);
     if (!shouldSync(path)) continue;
     const hash = typeof v.hash === 'string' ? v.hash : '';
@@ -191,6 +191,22 @@ export default class ObsidianSyncPlugin extends Plugin {
 
     const obj = data as Record<string, unknown>;
     const inner = obj.files;
+    if (Array.isArray(inner)) {
+      const map: SyncMetaMap = {};
+      for (const item of inner) {
+        if (!item || typeof item !== 'object') continue;
+        const rec = item as Record<string, unknown>;
+        if (typeof rec.path !== 'string') continue;
+        const path = normalizeVaultPath(rec.path);
+        if (!shouldSync(path)) continue;
+        map[path] = {
+          hash: typeof rec.hash === 'string' ? rec.hash : '',
+          updated_at: typeof rec.updated_at === 'number' ? rec.updated_at : Date.now(),
+          deleted: rec.deleted === true,
+        };
+      }
+      return map;
+    }
     if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
       return normalizeRemoteMap(inner as SyncMetaMap);
     }
@@ -331,8 +347,6 @@ export default class ObsidianSyncPlugin extends Plugin {
 
         const r = remote[path];
         const remoteDeleted = r?.deleted === true;
-        const remoteHash =
-          r && !remoteDeleted && typeof r.hash === 'string' && r.hash.length > 0 ? r.hash : null;
 
         try {
           if (remoteDeleted) {
@@ -355,37 +369,42 @@ export default class ObsidianSyncPlugin extends Plugin {
             continue;
           }
 
-          if (!localExists && remoteHash) {
+          if (localExists) {
+            if (localHash === null) {
+              console.log('sync decision:', path, 'noop', 'read_failed');
+              continue;
+            }
+            console.log('compare:', {
+              filePath: path,
+              localHash,
+              remoteHash: r?.hash,
+            });
+
+            if (!r) {
+              console.log('sync decision:', path, 'upload', 'LOCAL_NEW');
+              await this.uploadFile(path, meta);
+              continue;
+            }
+
+            const remoteHashStr =
+              typeof r.hash === 'string' ? r.hash : String(r.hash ?? '');
+            if (remoteHashStr !== localHash) {
+              console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED');
+              await this.uploadFile(path, meta);
+              continue;
+            }
+
+            console.log('sync decision:', path, 'noop', 'SYNCED');
+            meta[path] = {
+              hash: localHash,
+              updated_at: typeof r.updated_at === 'number' ? r.updated_at : Date.now(),
+              deleted: false,
+            };
+            continue;
+          }
+
+          if (r) {
             console.log('sync decision:', path, 'download', 'REMOTE_NEW');
-            await this.downloadFile(path, meta);
-            continue;
-          }
-
-          if (localExists && !remoteHash) {
-            if (localHash === null) {
-              console.log('sync decision:', path, 'noop', 'read_failed');
-              continue;
-            }
-            console.log('sync decision:', path, 'upload', 'LOCAL_NEW');
-            await this.uploadFile(path, meta);
-            continue;
-          }
-
-          if (localExists && remoteHash) {
-            if (localHash === null) {
-              console.log('sync decision:', path, 'noop', 'read_failed');
-              continue;
-            }
-            if (localHash === remoteHash) {
-              console.log('sync decision:', path, 'noop', 'SYNCED');
-              meta[path] = {
-                hash: localHash,
-                updated_at: Date.now(),
-                deleted: false,
-              };
-              continue;
-            }
-            console.log('sync decision:', path, 'download', 'REMOTE_WINS');
             await this.downloadFile(path, meta);
             continue;
           }
