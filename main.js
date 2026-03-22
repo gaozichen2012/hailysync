@@ -14899,6 +14899,29 @@ async function ensureVaultFoldersForPath(vault, filePath) {
 function normalizeVaultPath(p) {
   return p.replace(/\\/g, "/");
 }
+function shouldSync(filePath) {
+  if (!filePath) return false;
+  const p = normalizeVaultPath(filePath);
+  if (p.startsWith(".")) return false;
+  if (p.includes(".obsidian")) return false;
+  if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return false;
+  return true;
+}
+function normalizeRemoteMap(raw) {
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!v || typeof v !== "object") continue;
+    const path = normalizeVaultPath(k);
+    if (!shouldSync(path)) continue;
+    const hash = typeof v.hash === "string" ? v.hash : "";
+    out[path] = {
+      hash,
+      updated_at: typeof v.updated_at === "number" ? v.updated_at : Date.now(),
+      deleted: v.deleted === true
+    };
+  }
+  return out;
+}
 var DEFAULT_SETTINGS = {
   serverUrl: "http://localhost:3000"
 };
@@ -14913,7 +14936,7 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "Vault Sync" });
     new import_obsidian.Setting(containerEl).setName("\u540C\u6B65\u670D\u52A1\u5668\u5730\u5740").setDesc(
-      "sync-server \u6839 URL\uFF0C\u65E0\u672B\u5C3E\u659C\u6760\u3002\u9700\u5B9E\u73B0 GET /manifest\u3001POST /upload\u3001GET /download\u3001POST /delete\uFF08JSON\uFF09\u3002"
+      "sync-server \u6839 URL\uFF0C\u65E0\u672B\u5C3E\u659C\u6760\u3002\u9700\u5B9E\u73B0 GET /files\u3001POST /upload\u3001GET /download\u3001POST /delete\uFF08JSON\uFF09\u3002"
     ).addText(
       (text) => text.setPlaceholder("http://localhost:3000").setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
         this.plugin.settings.serverUrl = value.trim() || DEFAULT_SETTINGS.serverUrl;
@@ -14950,24 +14973,10 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   get baseUrl() {
     return this.settings.serverUrl.trim().replace(/\/+$/, "");
   }
-  getVaultBasePath() {
-    const a = this.app.vault.adapter;
-    if (a instanceof import_obsidian.FileSystemAdapter) {
-      return a.getBasePath();
-    }
-    return null;
-  }
-  shouldSkipSyncPath(path) {
-    const p = normalizeVaultPath(path);
-    if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return true;
-    const cfg = normalizeVaultPath(this.app.vault.configDir);
-    if (p === cfg || p.startsWith(`${cfg}/`)) return true;
-    return false;
-  }
-  async loadSyncMeta() {
+  async loadMeta() {
     try {
-      const raw = await this.app.vault.adapter.read(SYNC_META_FILENAME);
-      const parsed = JSON.parse(raw || "{}");
+      const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
+      const parsed = JSON.parse(content || "{}");
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         return parsed;
       }
@@ -14975,51 +14984,65 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     }
     return {};
   }
-  async saveSyncMeta(meta) {
-    const json = JSON.stringify(meta, null, 2);
-    const exists = this.app.vault.getAbstractFileByPath(SYNC_META_FILENAME);
-    if (exists instanceof import_obsidian.TFile) {
-      await this.app.vault.adapter.write(SYNC_META_FILENAME, json);
-    } else {
-      await this.app.vault.create(SYNC_META_FILENAME, json);
-    }
+  async saveMeta(meta) {
+    await this.app.vault.adapter.write(SYNC_META_FILENAME, JSON.stringify(meta, null, 2));
   }
-  collectLocalNotePaths() {
-    return this.app.vault.getMarkdownFiles().map((f) => normalizeVaultPath(f.path)).filter((p) => !this.shouldSkipSyncPath(p));
+  /** 本地待同步路径（已 shouldSync 过滤） */
+  listLocalFiles() {
+    return this.app.vault.getMarkdownFiles().map((f) => normalizeVaultPath(f.path)).filter(shouldSync);
   }
-  async fetchRemoteManifest() {
-    try {
-      const res = await axios_default.get(`${this.baseUrl}/manifest`, { responseType: "json" });
-      const data = res.data;
-      if (data && typeof data === "object" && !Array.isArray(data)) {
-        return data;
+  /** GET /files → 与本地 meta 同结构的 path → 条目映射 */
+  async fetchRemoteFiles() {
+    const res = await axios_default.get(`${this.baseUrl}/files`, { responseType: "json" });
+    const data = res.data;
+    if (!data || typeof data !== "object") return {};
+    if (Array.isArray(data)) {
+      const map = {};
+      for (const item of data) {
+        if (!item || typeof item !== "object") continue;
+        const rec = item;
+        if (typeof rec.path !== "string") continue;
+        const path = normalizeVaultPath(rec.path);
+        if (!shouldSync(path)) continue;
+        map[path] = {
+          hash: typeof rec.hash === "string" ? rec.hash : "",
+          updated_at: typeof rec.updated_at === "number" ? rec.updated_at : Date.now(),
+          deleted: rec.deleted === true
+        };
       }
-    } catch (e) {
-      if (isAxiosError2(e) && e.response?.status === 404) {
-        return {};
-      }
-      throw e;
+      return map;
     }
-    return {};
+    const obj = data;
+    const inner = obj.files;
+    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+      return normalizeRemoteMap(inner);
+    }
+    return normalizeRemoteMap(obj);
   }
-  async uploadFile(filePath) {
+  async uploadFile(filePath, meta) {
     const normalized = normalizeVaultPath(filePath);
     try {
       const content = await this.app.vault.adapter.read(normalized);
       const hash = (0, import_blueimp_md5.default)(content || "");
       console.log("upload:", normalized, (content || "").length, hash);
+      const updated_at = Date.now();
       await axios_default.post(this.baseUrl + "/upload", {
         path: normalized,
         content: content || "",
         hash,
-        updated_at: Date.now()
+        updated_at
       });
+      meta[normalized] = {
+        hash,
+        updated_at,
+        deleted: false
+      };
     } catch (err) {
       console.error("upload failed:", normalized, err);
       throw err;
     }
   }
-  async downloadFile(filePath) {
+  async downloadFile(filePath, meta) {
     const normalized = normalizeVaultPath(filePath);
     try {
       const res = await axios_default.get(this.baseUrl + "/download", {
@@ -15034,7 +15057,14 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         await ensureVaultFoldersForPath(this.app.vault, normalized);
         await this.app.vault.create(normalized, content);
       }
-      console.log("download ok:", normalized);
+      const hash = (0, import_blueimp_md5.default)(content);
+      const updated_at = Date.now();
+      meta[normalized] = {
+        hash,
+        updated_at,
+        deleted: false
+      };
+      console.log("download:", normalized, content.length, hash);
     } catch (err) {
       console.error("download failed:", normalized, err);
       throw err;
@@ -15046,64 +15076,12 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       path: normalized
     });
   }
-  conflictBackupPath(originalPath) {
-    const normalized = normalizeVaultPath(originalPath);
-    const ts = Date.now();
-    const lastDot = normalized.lastIndexOf(".");
-    if (lastDot > 0) {
-      return `${normalized.slice(0, lastDot)}.conflict.${ts}${normalized.slice(lastDot)}`;
-    }
-    return `${normalized}.conflict.${ts}.md`;
-  }
   async deleteLocalFile(path) {
     const normalized = normalizeVaultPath(path);
     const f = this.app.vault.getAbstractFileByPath(normalized);
     if (f instanceof import_obsidian.TFile) {
       await this.app.vault.delete(f);
     }
-  }
-  decidePath(args) {
-    const { localHash, remote, meta } = args;
-    const localExists = localHash !== null;
-    const remoteDeleted = remote?.deleted === true;
-    const remoteHash = remote && !remoteDeleted && typeof remote.hash === "string" && remote.hash.length > 0 ? remote.hash : null;
-    const last = meta && !meta.deleted && meta.hash ? meta.hash : null;
-    if (remoteDeleted && localExists) {
-      return { decision: "delete_local", detail: "REMOTE_DELETED" };
-    }
-    if (remoteDeleted && !localExists) {
-      return { decision: "noop", detail: "REMOTE_DELETED_NO_LOCAL" };
-    }
-    if (!localExists && last && !meta?.deleted) {
-      return { decision: "post_delete_remote", detail: "LOCAL_DELETED" };
-    }
-    if (!localExists && remoteHash) {
-      return { decision: "download", detail: "REMOTE_NEW" };
-    }
-    if (localExists && remoteHash === null && !remoteDeleted) {
-      return { decision: "upload", detail: "LOCAL_NEW" };
-    }
-    if (localExists && remoteHash) {
-      if (localHash === remoteHash) {
-        return { decision: "noop", detail: "same_hash" };
-      }
-      if (last === null) {
-        return { decision: "conflict_keep_remote", detail: "both_modified_no_meta" };
-      }
-      if (localHash !== last && remoteHash !== last) {
-        if (localHash === remoteHash) {
-          return { decision: "noop", detail: "converged" };
-        }
-        return { decision: "conflict_keep_remote", detail: "both_modified" };
-      }
-      if (localHash === last && remoteHash !== last) {
-        return { decision: "download", detail: "REMOTE_MODIFIED" };
-      }
-      if (remoteHash === last && localHash !== last) {
-        return { decision: "upload", detail: "LOCAL_MODIFIED" };
-      }
-    }
-    return { decision: "noop", detail: "none" };
   }
   async syncNow() {
     if (this.syncRunning) {
@@ -15112,36 +15090,40 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     }
     this.syncRunning = true;
     try {
-      const base = this.getVaultBasePath();
-      if (!base) {
-        new import_obsidian.Notice("\u4EC5\u652F\u6301\u672C\u5730\u6587\u4EF6\u5939 vault\uFF08FileSystemAdapter\uFF09");
-        return;
-      }
       const server = this.baseUrl;
       if (!server) {
         new import_obsidian.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u540C\u6B65\u670D\u52A1\u5668\u5730\u5740");
         return;
       }
       new import_obsidian.Notice("\u6B63\u5728\u540C\u6B65\u2026");
-      let meta = await this.loadSyncMeta();
+      const meta = await this.loadMeta();
+      for (const k of Object.keys(meta)) {
+        if (!shouldSync(k)) delete meta[k];
+      }
       let remote;
       try {
-        remote = await this.fetchRemoteManifest();
+        remote = await this.fetchRemoteFiles();
       } catch {
-        new import_obsidian.Notice("\u540C\u6B65\u4E2D\u6B62\uFF1A\u65E0\u6CD5\u62C9\u53D6\u8FDC\u7AEF manifest");
+        new import_obsidian.Notice("\u540C\u6B65\u4E2D\u6B62\uFF1A\u65E0\u6CD5\u62C9\u53D6\u8FDC\u7AEF /files");
         return;
       }
-      const localPaths = this.collectLocalNotePaths();
-      const pathSet = /* @__PURE__ */ new Set([
-        ...localPaths,
-        ...Object.keys(meta),
-        ...Object.keys(remote)
-      ]);
-      const sortedPaths = [...pathSet].filter((p) => !this.shouldSkipSyncPath(p)).sort();
+      const localPaths = this.listLocalFiles();
+      const pathSet = /* @__PURE__ */ new Set();
+      for (const p of localPaths) {
+        if (shouldSync(p)) pathSet.add(normalizeVaultPath(p));
+      }
+      for (const k of Object.keys(meta)) {
+        if (shouldSync(k)) pathSet.add(normalizeVaultPath(k));
+      }
+      for (const k of Object.keys(remote)) {
+        if (shouldSync(k)) pathSet.add(normalizeVaultPath(k));
+      }
+      const sortedPaths = [...pathSet].sort();
       for (const path of sortedPaths) {
-        let localHash = null;
         const abstract = this.app.vault.getAbstractFileByPath(path);
-        if (abstract instanceof import_obsidian.TFile) {
+        const localExists = abstract instanceof import_obsidian.TFile;
+        let localHash = null;
+        if (localExists) {
           try {
             const content = await this.app.vault.adapter.read(path);
             localHash = (0, import_blueimp_md5.default)(content || "");
@@ -15149,80 +15131,65 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
             localHash = null;
           }
         }
-        const m = meta[path];
         const r = remote[path];
-        const { decision, detail } = this.decidePath({
-          localHash,
-          remote: r,
-          meta: m
-        });
-        console.log("sync decision:", path, decision, detail);
+        const remoteDeleted = r?.deleted === true;
+        const remoteHash = r && !remoteDeleted && typeof r.hash === "string" && r.hash.length > 0 ? r.hash : null;
         try {
-          if (decision === "noop") {
-            if (detail === "REMOTE_DELETED_NO_LOCAL") {
+          if (remoteDeleted) {
+            if (localExists) {
+              console.log("sync decision:", path, "delete_local", "REMOTE_DELETED");
+              await this.deleteLocalFile(path);
+            }
+            delete meta[path];
+            continue;
+          }
+          if (!localExists && meta[path]) {
+            if (meta[path].deleted) {
               delete meta[path];
               continue;
             }
-            if (localHash && r && !r.deleted && localHash === r.hash) {
+            console.log("sync decision:", path, "post_delete_remote", "LOCAL_DELETED");
+            await this.postDeleteRemote(path);
+            delete meta[path];
+            continue;
+          }
+          if (!localExists && remoteHash) {
+            console.log("sync decision:", path, "download", "REMOTE_NEW");
+            await this.downloadFile(path, meta);
+            continue;
+          }
+          if (localExists && !remoteHash) {
+            if (localHash === null) {
+              console.log("sync decision:", path, "noop", "read_failed");
+              continue;
+            }
+            console.log("sync decision:", path, "upload", "LOCAL_NEW");
+            await this.uploadFile(path, meta);
+            continue;
+          }
+          if (localExists && remoteHash) {
+            if (localHash === null) {
+              console.log("sync decision:", path, "noop", "read_failed");
+              continue;
+            }
+            if (localHash === remoteHash) {
+              console.log("sync decision:", path, "noop", "SYNCED");
               meta[path] = {
                 hash: localHash,
                 updated_at: Date.now(),
                 deleted: false
               };
+              continue;
             }
+            console.log("sync decision:", path, "download", "REMOTE_WINS");
+            await this.downloadFile(path, meta);
             continue;
-          }
-          if (decision === "delete_local") {
-            await this.deleteLocalFile(path);
-            meta[path] = {
-              hash: "",
-              updated_at: Date.now(),
-              deleted: true
-            };
-            remote[path] = { hash: "", updated_at: Date.now(), deleted: true };
-            continue;
-          }
-          if (decision === "post_delete_remote") {
-            await this.postDeleteRemote(path);
-            delete meta[path];
-            remote[path] = { hash: "", updated_at: Date.now(), deleted: true };
-            continue;
-          }
-          if (decision === "upload") {
-            await this.uploadFile(path);
-            const content = await this.app.vault.adapter.read(path);
-            const h = (0, import_blueimp_md5.default)(content || "");
-            meta[path] = { hash: h, updated_at: Date.now(), deleted: false };
-            continue;
-          }
-          if (decision === "download") {
-            await this.downloadFile(path);
-            const content = await this.app.vault.adapter.read(path);
-            const h = (0, import_blueimp_md5.default)(content || "");
-            const ru = r?.updated_at ?? Date.now();
-            meta[path] = { hash: h, updated_at: ru, deleted: false };
-            continue;
-          }
-          if (decision === "conflict_keep_remote") {
-            const abstractFile = this.app.vault.getAbstractFileByPath(path);
-            if (abstractFile instanceof import_obsidian.TFile) {
-              const localContent = await this.app.vault.adapter.read(path);
-              const backupPath = this.conflictBackupPath(path);
-              await ensureVaultFoldersForPath(this.app.vault, backupPath);
-              await this.app.vault.create(backupPath, localContent || "");
-              console.log("sync decision:", backupPath, "conflict_backup", detail);
-            }
-            await this.downloadFile(path);
-            const content = await this.app.vault.adapter.read(path);
-            const h = (0, import_blueimp_md5.default)(content || "");
-            const ru = r?.updated_at ?? Date.now();
-            meta[path] = { hash: h, updated_at: ru, deleted: false };
           }
         } catch (e) {
           console.error("sync step failed:", path, e);
         }
       }
-      await this.saveSyncMeta(meta);
+      await this.saveMeta(meta);
       new import_obsidian.Notice("\u540C\u6B65\u5B8C\u6210");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
