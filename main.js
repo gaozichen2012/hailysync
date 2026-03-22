@@ -14907,7 +14907,7 @@ function shouldSync(filePath) {
   if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return false;
   return true;
 }
-var REMOTE_PATH_KEY_BLOCKLIST = /* @__PURE__ */ new Set([
+var REMOTE_MAP_KEY_DENYLIST = /* @__PURE__ */ new Set([
   "schemaVersion",
   "version",
   "files",
@@ -14918,20 +14918,26 @@ var REMOTE_PATH_KEY_BLOCKLIST = /* @__PURE__ */ new Set([
   "list",
   "items",
   "records",
-  "result"
+  "result",
+  "payload",
+  "hash",
+  "updated_at",
+  "deleted",
+  "md5",
+  "etag",
+  "updatedAt",
+  "mtime",
+  "size"
 ]);
-var REMOTE_ROOT_IGNORE = /* @__PURE__ */ new Set([
-  "schemaVersion",
-  "version",
-  "success",
-  "code",
-  "message",
-  "files",
-  "data",
-  "list",
-  "items",
-  "records",
-  "result"
+var REMOTE_FILE_META_FIELD_KEYS = /* @__PURE__ */ new Set([
+  "hash",
+  "updated_at",
+  "deleted",
+  "md5",
+  "etag",
+  "updatedAt",
+  "mtime",
+  "size"
 ]);
 function isPlainObjectRecord(v) {
   return v != null && typeof v === "object" && !Array.isArray(v);
@@ -14962,11 +14968,17 @@ function peelRemoteFilesWrapperDeep(o) {
   }
   return cur;
 }
+function isLikelySingleFileMetaRecord(o) {
+  const keys = Object.keys(o);
+  if (keys.length === 0) return false;
+  return keys.every((k) => REMOTE_FILE_META_FIELD_KEYS.has(k));
+}
 function diveIntoFilesMap(obj) {
   let cur = obj;
   for (let i = 0; i < 12; i++) {
     const inner = cur.files;
     if (!isPlainObjectRecord(inner)) break;
+    if (isLikelySingleFileMetaRecord(inner)) break;
     cur = inner;
   }
   return cur;
@@ -14974,7 +14986,7 @@ function diveIntoFilesMap(obj) {
 function normalizeRemoteMap(raw) {
   const out = {};
   for (const [k, v] of Object.entries(raw)) {
-    if (REMOTE_PATH_KEY_BLOCKLIST.has(k)) continue;
+    if (REMOTE_MAP_KEY_DENYLIST.has(k)) continue;
     const path = normalizeVaultPath(k);
     if (!shouldSync(path)) continue;
     if (v === null || v === void 0) continue;
@@ -15015,9 +15027,15 @@ function extractRemoteFilesMapPayload(parsed) {
     }
   }
   cur = diveIntoFilesMap(cur);
+  if (isLikelySingleFileMetaRecord(cur)) {
+    console.error(
+      "/files \u89E3\u6790\u540E\u4E3A\u5355\u6761 metadata \u5BF9\u8C61\uFF08\u65E0\u8DEF\u5F84\u952E\uFF09\uFF0C\u671F\u671B path\u2192meta\uFF1B\u8BF7\u68C0\u67E5\u662F\u5426\u591A\u5265\u4E86\u4E00\u5C42\u6216 files \u5185\u8BEF\u653E meta"
+    );
+    return {};
+  }
   const out = {};
   for (const [k, v] of Object.entries(cur)) {
-    if (REMOTE_ROOT_IGNORE.has(k)) continue;
+    if (REMOTE_MAP_KEY_DENYLIST.has(k)) continue;
     out[k] = v;
   }
   return out;

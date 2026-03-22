@@ -51,8 +51,11 @@ function shouldSync(filePath: string): boolean {
   return true;
 }
 
-/** 规范化 map 时跳过的键（非 vault 路径名） */
-const REMOTE_PATH_KEY_BLOCKLIST = new Set([
+/**
+ * 绝不能当作 vault 路径的键：API 包装字段 + 单文件 metadata 字段名
+ * （避免把 { hash, updated_at } 误当成 path→meta 或把 meta 字段当文件名）
+ */
+const REMOTE_MAP_KEY_DENYLIST = new Set([
   'schemaVersion',
   'version',
   'files',
@@ -64,21 +67,27 @@ const REMOTE_PATH_KEY_BLOCKLIST = new Set([
   'items',
   'records',
   'result',
+  'payload',
+  'hash',
+  'updated_at',
+  'deleted',
+  'md5',
+  'etag',
+  'updatedAt',
+  'mtime',
+  'size',
 ]);
 
-/** 从 /files 根对象扫平为 map 时忽略的包装字段 */
-const REMOTE_ROOT_IGNORE = new Set([
-  'schemaVersion',
-  'version',
-  'success',
-  'code',
-  'message',
-  'files',
-  'data',
-  'list',
-  'items',
-  'records',
-  'result',
+/** 仅含这些键的普通对象视为「一条文件的 metadata」，不是 path→meta 表 */
+const REMOTE_FILE_META_FIELD_KEYS = new Set([
+  'hash',
+  'updated_at',
+  'deleted',
+  'md5',
+  'etag',
+  'updatedAt',
+  'mtime',
+  'size',
 ]);
 
 function isPlainObjectRecord(v: unknown): v is Record<string, unknown> {
@@ -115,12 +124,22 @@ function peelRemoteFilesWrapperDeep(o: Record<string, unknown>): Record<string, 
   return cur;
 }
 
-/** 连续展开 .files 对象，避免 { data: { files: { "a.md": {} } } } 在 normalize 时被键 files 整表丢弃 */
+function isLikelySingleFileMetaRecord(o: Record<string, unknown>): boolean {
+  const keys = Object.keys(o);
+  if (keys.length === 0) return false;
+  return keys.every((k) => REMOTE_FILE_META_FIELD_KEYS.has(k));
+}
+
+/**
+ * 展开 .files 仅当内层仍是「路径→meta」表。
+ * 若 files 内已是 { hash, updated_at } 则禁止下钻，否则会误把 meta 字段当路径名。
+ */
 function diveIntoFilesMap(obj: Record<string, unknown>): Record<string, unknown> {
   let cur = obj;
   for (let i = 0; i < 12; i++) {
     const inner = cur.files;
     if (!isPlainObjectRecord(inner)) break;
+    if (isLikelySingleFileMetaRecord(inner)) break;
     cur = inner;
   }
   return cur;
@@ -129,7 +148,7 @@ function diveIntoFilesMap(obj: Record<string, unknown>): Record<string, unknown>
 function normalizeRemoteMap(raw: SyncMetaMap): SyncMetaMap {
   const out: SyncMetaMap = {};
   for (const [k, v] of Object.entries(raw)) {
-    if (REMOTE_PATH_KEY_BLOCKLIST.has(k)) continue;
+    if (REMOTE_MAP_KEY_DENYLIST.has(k)) continue;
     const path = normalizeVaultPath(k);
     if (!shouldSync(path)) continue;
 
@@ -194,9 +213,16 @@ function extractRemoteFilesMapPayload(parsed: unknown): SyncMetaMap {
 
   cur = diveIntoFilesMap(cur);
 
+  if (isLikelySingleFileMetaRecord(cur)) {
+    console.error(
+      '/files 解析后为单条 metadata 对象（无路径键），期望 path→meta；请检查是否多剥了一层或 files 内误放 meta',
+    );
+    return {};
+  }
+
   const out: SyncMetaMap = {};
   for (const [k, v] of Object.entries(cur)) {
-    if (REMOTE_ROOT_IGNORE.has(k)) continue;
+    if (REMOTE_MAP_KEY_DENYLIST.has(k)) continue;
     out[k] = v as SyncFileMeta;
   }
   return out;
