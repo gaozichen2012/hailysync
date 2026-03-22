@@ -67,21 +67,38 @@ function normalizeRemoteMap(raw: SyncMetaMap): SyncMetaMap {
   return out;
 }
 
-/** 从 /files 响应体中取出「文件行」数组（顶层数组或常见包装字段，含一层嵌套对象） */
-function extractRemoteFilesArray(data: unknown, depth = 0): unknown[] | null {
-  if (depth > 6) return null;
-  if (Array.isArray(data)) return data;
-  if (!data || typeof data !== 'object') return null;
+/**
+ * 将 /files 解析后的 JSON 归为「数组列表」或「path → meta 的 map」。
+ * 对象格式优先：顶层 map 或常见包装 { files: map|array }、{ data: map|array }。
+ */
+function pickRemoteFilesArrayOrMap(data: unknown):
+  | { kind: 'array'; list: unknown[] }
+  | { kind: 'map'; raw: SyncMetaMap }
+  | { kind: 'empty' } {
+  if (data == null) return { kind: 'empty' };
+  if (Array.isArray(data)) return { kind: 'array', list: data };
+  if (typeof data !== 'object') return { kind: 'empty' };
+
   const o = data as Record<string, unknown>;
-  for (const k of ['data', 'files', 'list', 'items', 'records', 'result']) {
-    const v = o[k];
-    if (Array.isArray(v)) return v;
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      const inner = extractRemoteFilesArray(v, depth + 1);
-      if (inner) return inner;
-    }
+
+  const files = o.files;
+  if (Array.isArray(files)) return { kind: 'array', list: files };
+  if (files && typeof files === 'object' && !Array.isArray(files)) {
+    return { kind: 'map', raw: files as SyncMetaMap };
   }
-  return null;
+
+  const d = o.data;
+  if (Array.isArray(d)) return { kind: 'array', list: d };
+  if (d && typeof d === 'object' && !Array.isArray(d)) {
+    return { kind: 'map', raw: d as SyncMetaMap };
+  }
+
+  for (const key of ['list', 'items', 'records', 'result'] as const) {
+    const v = o[key];
+    if (Array.isArray(v)) return { kind: 'array', list: v };
+  }
+
+  return { kind: 'map', raw: o as SyncMetaMap };
 }
 
 function pathFromRemoteListItem(rec: Record<string, unknown>): string | null {
@@ -188,7 +205,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       .filter(shouldSync);
   }
 
-  /** GET /files → 与本地 meta 同结构的 path → 条目映射（数组响应必先转为 map） */
+  /** GET /files → 与本地 meta 同结构的 path → 条目映射（支持 map 与数组） */
   async fetchRemoteFiles(): Promise<SyncMetaMap> {
     const res = await axios.get(this.baseUrl + '/files', { responseType: 'text' });
     const raw = res.data as unknown;
@@ -199,23 +216,25 @@ export default class ObsidianSyncPlugin extends Plugin {
     if (typeof data === 'string') {
       const s = data.trim();
       if (s === '') {
-        data = [];
+        data = {};
       } else {
         try {
           data = JSON.parse(s) as unknown;
         } catch (e) {
-          console.error('JSON parse failed:', e);
-          data = [];
+          console.error('JSON parse failed', e);
+          data = {};
         }
       }
     }
 
-    const list = extractRemoteFilesArray(data);
-    if (list) {
-      const remoteFiles: SyncMetaMap = {};
-      for (const item of list) {
+    const picked = pickRemoteFilesArrayOrMap(data);
+    let remoteFiles: SyncMetaMap = {};
+
+    if (picked.kind === 'array') {
+      for (const item of picked.list) {
         if (!item || typeof item !== 'object') continue;
         const rec = item as Record<string, unknown>;
+        if (rec.deleted === true) continue;
         const pathRaw = pathFromRemoteListItem(rec);
         if (!pathRaw) continue;
         const path = normalizeVaultPath(pathRaw);
@@ -223,28 +242,13 @@ export default class ObsidianSyncPlugin extends Plugin {
         remoteFiles[path] = {
           hash: typeof rec.hash === 'string' ? rec.hash : '',
           updated_at: typeof rec.updated_at === 'number' ? rec.updated_at : Date.now(),
-          deleted: rec.deleted === true,
+          deleted: false,
         };
       }
-      console.log('remoteFiles map:', remoteFiles);
-      return remoteFiles;
+    } else if (picked.kind === 'map') {
+      remoteFiles = normalizeRemoteMap(picked.raw);
     }
 
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      const empty: SyncMetaMap = {};
-      console.error('/files 解析后无法得到文件列表或对象映射:', data);
-      console.log('remoteFiles map:', empty);
-      return empty;
-    }
-
-    const obj = data as Record<string, unknown>;
-    const inner = obj.files;
-    let remoteFiles: SyncMetaMap;
-    if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
-      remoteFiles = normalizeRemoteMap(inner as SyncMetaMap);
-    } else {
-      remoteFiles = normalizeRemoteMap(obj as SyncMetaMap);
-    }
     console.log('remoteFiles map:', remoteFiles);
     return remoteFiles;
   }

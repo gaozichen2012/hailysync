@@ -14922,20 +14922,26 @@ function normalizeRemoteMap(raw) {
   }
   return out;
 }
-function extractRemoteFilesArray(data, depth = 0) {
-  if (depth > 6) return null;
-  if (Array.isArray(data)) return data;
-  if (!data || typeof data !== "object") return null;
+function pickRemoteFilesArrayOrMap(data) {
+  if (data == null) return { kind: "empty" };
+  if (Array.isArray(data)) return { kind: "array", list: data };
+  if (typeof data !== "object") return { kind: "empty" };
   const o = data;
-  for (const k of ["data", "files", "list", "items", "records", "result"]) {
-    const v = o[k];
-    if (Array.isArray(v)) return v;
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      const inner = extractRemoteFilesArray(v, depth + 1);
-      if (inner) return inner;
-    }
+  const files = o.files;
+  if (Array.isArray(files)) return { kind: "array", list: files };
+  if (files && typeof files === "object" && !Array.isArray(files)) {
+    return { kind: "map", raw: files };
   }
-  return null;
+  const d = o.data;
+  if (Array.isArray(d)) return { kind: "array", list: d };
+  if (d && typeof d === "object" && !Array.isArray(d)) {
+    return { kind: "map", raw: d };
+  }
+  for (const key of ["list", "items", "records", "result"]) {
+    const v = o[key];
+    if (Array.isArray(v)) return { kind: "array", list: v };
+  }
+  return { kind: "map", raw: o };
 }
 function pathFromRemoteListItem(rec) {
   const p = rec.path ?? rec.filePath ?? rec.file;
@@ -15010,7 +15016,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   listLocalFiles() {
     return this.app.vault.getMarkdownFiles().map((f) => normalizeVaultPath(f.path)).filter(shouldSync);
   }
-  /** GET /files → 与本地 meta 同结构的 path → 条目映射（数组响应必先转为 map） */
+  /** GET /files → 与本地 meta 同结构的 path → 条目映射（支持 map 与数组） */
   async fetchRemoteFiles() {
     const res = await axios_default.get(this.baseUrl + "/files", { responseType: "text" });
     const raw = res.data;
@@ -15019,48 +15025,35 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     if (typeof data === "string") {
       const s = data.trim();
       if (s === "") {
-        data = [];
+        data = {};
       } else {
         try {
           data = JSON.parse(s);
         } catch (e) {
-          console.error("JSON parse failed:", e);
-          data = [];
+          console.error("JSON parse failed", e);
+          data = {};
         }
       }
     }
-    const list = extractRemoteFilesArray(data);
-    if (list) {
-      const remoteFiles2 = {};
-      for (const item of list) {
+    const picked = pickRemoteFilesArrayOrMap(data);
+    let remoteFiles = {};
+    if (picked.kind === "array") {
+      for (const item of picked.list) {
         if (!item || typeof item !== "object") continue;
         const rec = item;
+        if (rec.deleted === true) continue;
         const pathRaw = pathFromRemoteListItem(rec);
         if (!pathRaw) continue;
         const path = normalizeVaultPath(pathRaw);
         if (!shouldSync(path)) continue;
-        remoteFiles2[path] = {
+        remoteFiles[path] = {
           hash: typeof rec.hash === "string" ? rec.hash : "",
           updated_at: typeof rec.updated_at === "number" ? rec.updated_at : Date.now(),
-          deleted: rec.deleted === true
+          deleted: false
         };
       }
-      console.log("remoteFiles map:", remoteFiles2);
-      return remoteFiles2;
-    }
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-      const empty = {};
-      console.error("/files \u89E3\u6790\u540E\u65E0\u6CD5\u5F97\u5230\u6587\u4EF6\u5217\u8868\u6216\u5BF9\u8C61\u6620\u5C04:", data);
-      console.log("remoteFiles map:", empty);
-      return empty;
-    }
-    const obj = data;
-    const inner = obj.files;
-    let remoteFiles;
-    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-      remoteFiles = normalizeRemoteMap(inner);
-    } else {
-      remoteFiles = normalizeRemoteMap(obj);
+    } else if (picked.kind === "map") {
+      remoteFiles = normalizeRemoteMap(picked.raw);
     }
     console.log("remoteFiles map:", remoteFiles);
     return remoteFiles;
