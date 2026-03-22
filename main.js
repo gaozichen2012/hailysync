@@ -14936,44 +14936,87 @@ var REMOTE_ROOT_IGNORE = /* @__PURE__ */ new Set([
 function isPlainObjectRecord(v) {
   return v != null && typeof v === "object" && !Array.isArray(v);
 }
+function peelRemoteFilesWrapperOnce(o) {
+  const d = o.data ?? o.payload;
+  if (isPlainObjectRecord(d)) return d;
+  const r = o.result;
+  if (isPlainObjectRecord(r)) return r;
+  if (typeof o.body === "string") {
+    const s = o.body.trim();
+    if (s) {
+      try {
+        const b = JSON.parse(s);
+        if (isPlainObjectRecord(b)) return b;
+      } catch {
+      }
+    }
+  }
+  return o;
+}
+function peelRemoteFilesWrapperDeep(o) {
+  let cur = o;
+  for (let i = 0; i < 6; i++) {
+    const next = peelRemoteFilesWrapperOnce(cur);
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+function diveIntoFilesMap(obj) {
+  let cur = obj;
+  for (let i = 0; i < 12; i++) {
+    const inner = cur.files;
+    if (!isPlainObjectRecord(inner)) break;
+    cur = inner;
+  }
+  return cur;
+}
 function normalizeRemoteMap(raw) {
   const out = {};
   for (const [k, v] of Object.entries(raw)) {
     if (REMOTE_PATH_KEY_BLOCKLIST.has(k)) continue;
-    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
     const path = normalizeVaultPath(k);
     if (!shouldSync(path)) continue;
-    const hash = typeof v.hash === "string" ? v.hash : "";
+    if (v === null || v === void 0) continue;
+    if (typeof v === "string" || typeof v === "number") {
+      out[path] = {
+        hash: String(v),
+        updated_at: Date.now(),
+        deleted: false
+      };
+      continue;
+    }
+    if (typeof v !== "object" || Array.isArray(v)) continue;
+    const rec = v;
+    const hashRaw = rec.hash ?? rec.md5 ?? rec.etag;
+    const hash = typeof hashRaw === "string" ? hashRaw : hashRaw != null ? String(hashRaw) : "";
+    const updatedRaw = rec.updated_at ?? rec.updatedAt ?? rec.mtime;
+    const updated_at = typeof updatedRaw === "number" ? updatedRaw : typeof updatedRaw === "string" && updatedRaw.trim() !== "" ? Number(updatedRaw) : NaN;
     out[path] = {
       hash,
-      updated_at: typeof v.updated_at === "number" ? v.updated_at : Date.now(),
-      deleted: v.deleted === true
+      updated_at: Number.isFinite(updated_at) ? updated_at : Date.now(),
+      deleted: rec.deleted === true
     };
   }
   return out;
 }
 function extractRemoteFilesMapPayload(parsed) {
   if (!isPlainObjectRecord(parsed)) return {};
-  const filesVal = parsed.files;
-  if (isPlainObjectRecord(filesVal)) {
-    return filesVal;
-  }
+  let cur = peelRemoteFilesWrapperDeep(parsed);
+  const filesVal = cur.files;
   if (typeof filesVal === "string") {
     const s = filesVal.trim();
     if (s) {
       try {
         const inner = JSON.parse(s);
-        if (isPlainObjectRecord(inner)) return inner;
+        if (isPlainObjectRecord(inner)) cur = inner;
       } catch {
       }
     }
   }
-  const dataVal = parsed.data;
-  if (isPlainObjectRecord(dataVal)) {
-    return dataVal;
-  }
+  cur = diveIntoFilesMap(cur);
   const out = {};
-  for (const [k, v] of Object.entries(parsed)) {
+  for (const [k, v] of Object.entries(cur)) {
     if (REMOTE_ROOT_IGNORE.has(k)) continue;
     out[k] = v;
   }
@@ -15076,6 +15119,8 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       return empty;
     }
     const payload = extractRemoteFilesMapPayload(data);
+    const pk = Object.keys(payload);
+    console.log("/files extract:", { keyCount: pk.length, sampleKeys: pk.slice(0, 12) });
     const remoteFiles = normalizeRemoteMap(payload);
     console.log("remoteFiles map:", remoteFiles);
     return remoteFiles;

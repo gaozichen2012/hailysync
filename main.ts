@@ -85,55 +85,117 @@ function isPlainObjectRecord(v: unknown): v is Record<string, unknown> {
   return v != null && typeof v === 'object' && !Array.isArray(v);
 }
 
+/** 常见 API 包装：{ data|result|payload: {...} } 或 body 为 JSON 字符串 */
+function peelRemoteFilesWrapperOnce(o: Record<string, unknown>): Record<string, unknown> {
+  const d = o.data ?? o.payload;
+  if (isPlainObjectRecord(d)) return d;
+  const r = o.result;
+  if (isPlainObjectRecord(r)) return r;
+  if (typeof o.body === 'string') {
+    const s = o.body.trim();
+    if (s) {
+      try {
+        const b = JSON.parse(s) as unknown;
+        if (isPlainObjectRecord(b)) return b;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return o;
+}
+
+function peelRemoteFilesWrapperDeep(o: Record<string, unknown>): Record<string, unknown> {
+  let cur = o;
+  for (let i = 0; i < 6; i++) {
+    const next = peelRemoteFilesWrapperOnce(cur);
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+/** 连续展开 .files 对象，避免 { data: { files: { "a.md": {} } } } 在 normalize 时被键 files 整表丢弃 */
+function diveIntoFilesMap(obj: Record<string, unknown>): Record<string, unknown> {
+  let cur = obj;
+  for (let i = 0; i < 12; i++) {
+    const inner = cur.files;
+    if (!isPlainObjectRecord(inner)) break;
+    cur = inner;
+  }
+  return cur;
+}
+
 function normalizeRemoteMap(raw: SyncMetaMap): SyncMetaMap {
   const out: SyncMetaMap = {};
   for (const [k, v] of Object.entries(raw)) {
     if (REMOTE_PATH_KEY_BLOCKLIST.has(k)) continue;
-    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
     const path = normalizeVaultPath(k);
     if (!shouldSync(path)) continue;
-    const hash = typeof v.hash === 'string' ? v.hash : '';
+
+    if (v === null || v === undefined) continue;
+
+    if (typeof v === 'string' || typeof v === 'number') {
+      out[path] = {
+        hash: String(v),
+        updated_at: Date.now(),
+        deleted: false,
+      };
+      continue;
+    }
+
+    if (typeof v !== 'object' || Array.isArray(v)) continue;
+
+    const rec = v as unknown as Record<string, unknown>;
+    const hashRaw = rec.hash ?? rec.md5 ?? rec.etag;
+    const hash =
+      typeof hashRaw === 'string'
+        ? hashRaw
+        : hashRaw != null
+          ? String(hashRaw)
+          : '';
+    const updatedRaw = rec.updated_at ?? rec.updatedAt ?? rec.mtime;
+    const updated_at =
+      typeof updatedRaw === 'number'
+        ? updatedRaw
+        : typeof updatedRaw === 'string' && updatedRaw.trim() !== ''
+          ? Number(updatedRaw)
+          : NaN;
     out[path] = {
       hash,
-      updated_at: typeof v.updated_at === 'number' ? v.updated_at : Date.now(),
-      deleted: v.deleted === true,
+      updated_at: Number.isFinite(updated_at) ? updated_at : Date.now(),
+      deleted: rec.deleted === true,
     };
   }
   return out;
 }
 
 /**
- * 仅从 path→metadata 的 map 构建远端表（不支持数组列表）。
- * - 若存在 files 且为对象：用 files 作为文件 map（忽略同层的 schemaVersion 等）。
- * - 若 files 为 JSON 字符串：parse 后为对象则使用。
- * - 若 files 为数组或其它：忽略 files，改用顶层除保留键外的字段作为 map。
+ * /files 解析为 path→meta：先剥 API 包装，再展开 .files，最后去掉根级元数据键。
+ * 不支持顶层数组。
  */
 function extractRemoteFilesMapPayload(parsed: unknown): SyncMetaMap {
   if (!isPlainObjectRecord(parsed)) return {};
 
-  const filesVal = parsed.files;
-  if (isPlainObjectRecord(filesVal)) {
-    return filesVal as SyncMetaMap;
-  }
+  let cur = peelRemoteFilesWrapperDeep(parsed);
+
+  const filesVal = cur.files;
   if (typeof filesVal === 'string') {
     const s = filesVal.trim();
     if (s) {
       try {
         const inner = JSON.parse(s) as unknown;
-        if (isPlainObjectRecord(inner)) return inner as SyncMetaMap;
+        if (isPlainObjectRecord(inner)) cur = inner;
       } catch {
         /* ignore */
       }
     }
   }
 
-  const dataVal = parsed.data;
-  if (isPlainObjectRecord(dataVal)) {
-    return dataVal as SyncMetaMap;
-  }
+  cur = diveIntoFilesMap(cur);
 
   const out: SyncMetaMap = {};
-  for (const [k, v] of Object.entries(parsed)) {
+  for (const [k, v] of Object.entries(cur)) {
     if (REMOTE_ROOT_IGNORE.has(k)) continue;
     out[k] = v as SyncFileMeta;
   }
@@ -271,6 +333,9 @@ export default class ObsidianSyncPlugin extends Plugin {
     }
 
     const payload = extractRemoteFilesMapPayload(data);
+    const pk = Object.keys(payload);
+    console.log('/files extract:', { keyCount: pk.length, sampleKeys: pk.slice(0, 12) });
+
     const remoteFiles = normalizeRemoteMap(payload);
 
     console.log('remoteFiles map:', remoteFiles);
