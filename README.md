@@ -30,7 +30,9 @@ npm run build
 
 ## 配置
 
-默认服务地址 `http://localhost:3000`（见 `main.ts` 中 `DEFAULT_SETTINGS`）。后续可在设置页写入 `data.json`。
+Obsidian：**设置 → Vault Sync (local)**，填写 **同步服务器地址**（sync-server 根 URL，无末尾斜杠），例如 `http://公网IP:3000`。
+
+未配置或留空时，首次加载仍使用默认 `http://localhost:3000`；也可直接编辑 `.obsidian/plugins/obsidian-sync-plugin/data.json` 中的 `serverUrl`。
 
 ## 要求
 
