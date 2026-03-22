@@ -1,7 +1,7 @@
 {
   "name": "obsidian-sync-plugin",
-  "version": "0.1.4",
-  "description": "Obsidian 插件：设置与 UI，调用 sync-core 执行同步",
+  "version": "0.1.6",
+  "description": "Obsidian 插件：JSON 协议与 sync-server 双向同步（hash + manifest）",
   "main": "main.js",
   "scripts": {
     "build": "esbuild main.ts --bundle --platform=node --format=cjs --outfile=main.js --external:obsidian",
@@ -11,7 +11,8 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "sync-core": "^1.0.1"
+    "axios": "^1.13.6",
+    "blueimp-md5": "^2.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

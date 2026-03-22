@@ -13,5 +13,5 @@
     "strictNullChecks": true,
     "lib": ["DOM", "ES2022"]
   },
-  "include": ["main.ts"]
+  "include": ["main.ts", "types-blueimp-md5.d.ts"]
 }

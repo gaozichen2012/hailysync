@@ -1,9 +1,9 @@
 {
   "id": "obsidian-sync-plugin",
   "name": "Vault Sync (local)",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "minAppVersion": "1.5.0",
-  "description": "使用 sync-core 将当前 vault 与自建 sync-server 同步",
+  "description": "使用 JSON 协议（upload/download/delete/manifest）与自建 sync-server 同步",
   "author": "",
   "isDesktopOnly": true
 }
