@@ -14907,9 +14907,39 @@ function shouldSync(filePath) {
   if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return false;
   return true;
 }
+var REMOTE_PATH_KEY_BLOCKLIST = /* @__PURE__ */ new Set([
+  "schemaVersion",
+  "version",
+  "files",
+  "data",
+  "success",
+  "code",
+  "message",
+  "list",
+  "items",
+  "records",
+  "result"
+]);
+var REMOTE_ROOT_IGNORE = /* @__PURE__ */ new Set([
+  "schemaVersion",
+  "version",
+  "success",
+  "code",
+  "message",
+  "files",
+  "data",
+  "list",
+  "items",
+  "records",
+  "result"
+]);
+function isPlainObjectRecord(v) {
+  return v != null && typeof v === "object" && !Array.isArray(v);
+}
 function normalizeRemoteMap(raw) {
   const out = {};
   for (const [k, v] of Object.entries(raw)) {
+    if (REMOTE_PATH_KEY_BLOCKLIST.has(k)) continue;
     if (!v || typeof v !== "object" || Array.isArray(v)) continue;
     const path = normalizeVaultPath(k);
     if (!shouldSync(path)) continue;
@@ -14922,30 +14952,32 @@ function normalizeRemoteMap(raw) {
   }
   return out;
 }
-function pickRemoteFilesArrayOrMap(data) {
-  if (data == null) return { kind: "empty" };
-  if (Array.isArray(data)) return { kind: "array", list: data };
-  if (typeof data !== "object") return { kind: "empty" };
-  const o = data;
-  const files = o.files;
-  if (Array.isArray(files)) return { kind: "array", list: files };
-  if (files && typeof files === "object" && !Array.isArray(files)) {
-    return { kind: "map", raw: files };
+function extractRemoteFilesMapPayload(parsed) {
+  if (!isPlainObjectRecord(parsed)) return {};
+  const filesVal = parsed.files;
+  if (isPlainObjectRecord(filesVal)) {
+    return filesVal;
   }
-  const d = o.data;
-  if (Array.isArray(d)) return { kind: "array", list: d };
-  if (d && typeof d === "object" && !Array.isArray(d)) {
-    return { kind: "map", raw: d };
+  if (typeof filesVal === "string") {
+    const s = filesVal.trim();
+    if (s) {
+      try {
+        const inner = JSON.parse(s);
+        if (isPlainObjectRecord(inner)) return inner;
+      } catch {
+      }
+    }
   }
-  for (const key of ["list", "items", "records", "result"]) {
-    const v = o[key];
-    if (Array.isArray(v)) return { kind: "array", list: v };
+  const dataVal = parsed.data;
+  if (isPlainObjectRecord(dataVal)) {
+    return dataVal;
   }
-  return { kind: "map", raw: o };
-}
-function pathFromRemoteListItem(rec) {
-  const p = rec.path ?? rec.filePath ?? rec.file;
-  return typeof p === "string" && p.length > 0 ? p : null;
+  const out = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    if (REMOTE_ROOT_IGNORE.has(k)) continue;
+    out[k] = v;
+  }
+  return out;
 }
 var DEFAULT_SETTINGS = {
   serverUrl: "http://localhost:3000"
@@ -15016,7 +15048,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   listLocalFiles() {
     return this.app.vault.getMarkdownFiles().map((f) => normalizeVaultPath(f.path)).filter(shouldSync);
   }
-  /** GET /files → 与本地 meta 同结构的 path → 条目映射（支持 map 与数组） */
+  /** GET /files → path→meta 映射（仅 map；解析一次后 normalize，不再覆盖） */
   async fetchRemoteFiles() {
     const res = await axios_default.get(this.baseUrl + "/files", { responseType: "text" });
     const raw = res.data;
@@ -15035,26 +15067,16 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         }
       }
     }
-    const picked = pickRemoteFilesArrayOrMap(data);
-    let remoteFiles = {};
-    if (picked.kind === "array") {
-      for (const item of picked.list) {
-        if (!item || typeof item !== "object") continue;
-        const rec = item;
-        if (rec.deleted === true) continue;
-        const pathRaw = pathFromRemoteListItem(rec);
-        if (!pathRaw) continue;
-        const path = normalizeVaultPath(pathRaw);
-        if (!shouldSync(path)) continue;
-        remoteFiles[path] = {
-          hash: typeof rec.hash === "string" ? rec.hash : "",
-          updated_at: typeof rec.updated_at === "number" ? rec.updated_at : Date.now(),
-          deleted: false
-        };
-      }
-    } else if (picked.kind === "map") {
-      remoteFiles = normalizeRemoteMap(picked.raw);
+    if (Array.isArray(data)) {
+      console.error(
+        "/files \u671F\u671B path\u2192metadata \u7684\u5BF9\u8C61\uFF1B\u6536\u5230\u6570\u7EC4\u5DF2\u5FFD\u7565\uFF08\u8BF7\u670D\u52A1\u7AEF\u6539\u4E3A map \u6216\u5305\u5728 files \u5BF9\u8C61\u5185\uFF09"
+      );
+      const empty = {};
+      console.log("remoteFiles map:", empty);
+      return empty;
     }
+    const payload = extractRemoteFilesMapPayload(data);
+    const remoteFiles = normalizeRemoteMap(payload);
     console.log("remoteFiles map:", remoteFiles);
     return remoteFiles;
   }
