@@ -5,12 +5,49 @@ import {
   PluginSettingTab,
   Setting,
   FileSystemAdapter,
+  TFile,
 } from 'obsidian';
+import type { Vault } from 'obsidian';
 
 // sync-core 为 CommonJS，由 esbuild 打入 main.js
 const { runSync } = require('sync-core') as {
-  runSync: (opts?: { server?: string }) => Promise<{ sessionId: string; aborted?: boolean }>;
+  runSync: (opts?: {
+    server?: string;
+    writeVaultFile?: (relativePath: string, content: string) => Promise<void>;
+  }) => Promise<{ sessionId: string; aborted?: boolean }>;
 };
+
+async function ensureVaultFoldersForPath(vault: Vault, filePath: string): Promise<void> {
+  const normalized = filePath.replace(/\\/g, '/');
+  const lastSlash = normalized.lastIndexOf('/');
+  if (lastSlash <= 0) return;
+  const folderPath = normalized.slice(0, lastSlash);
+  const segments = folderPath.split('/').filter(Boolean);
+  let acc = '';
+  for (const seg of segments) {
+    acc = acc ? `${acc}/${seg}` : seg;
+    const existing = vault.getAbstractFileByPath(acc);
+    if (!existing) {
+      await vault.createFolder(acc);
+    }
+  }
+}
+
+/** 供 sync-core download：responseType text 后写入 vault（modify / create） */
+async function writeDownloadedFileToVault(
+  vault: Vault,
+  saveAs: string,
+  content: string,
+): Promise<void> {
+  const normalized = saveAs.replace(/\\/g, '/');
+  await ensureVaultFoldersForPath(vault, normalized);
+  const file = vault.getAbstractFileByPath(normalized);
+  if (file instanceof TFile) {
+    await vault.modify(file, content);
+  } else {
+    await vault.create(normalized, content);
+  }
+}
 
 interface SyncPluginSettings {
   serverUrl: string;
@@ -104,7 +141,11 @@ export default class ObsidianSyncPlugin extends Plugin {
 
     new Notice('正在同步…');
     try {
-      const r = await runSync({ server });
+      const r = await runSync({
+        server,
+        writeVaultFile: (saveAs, content) =>
+          writeDownloadedFileToVault(this.app.vault, saveAs, content),
+      });
       if (r.aborted) {
         new Notice('同步中止：无法拉取远端文件列表');
       } else {

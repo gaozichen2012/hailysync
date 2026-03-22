@@ -15103,20 +15103,23 @@ var require_sync = __commonJS({
       }
       async function downloadFile(remotePath, saveAs) {
         try {
+          console.log("downloading:", saveAs);
           const res = await http.get(`${server}/download`, {
             params: { path: remotePath },
-            responseType: "stream"
+            responseType: "text"
           });
-          const target = path.join(root(), saveAs);
-          const writer = fs.createWriteStream(target);
-          res.data.pipe(writer);
-          await new Promise((resolve, reject) => {
-            writer.on("finish", resolve);
-            writer.on("error", reject);
-          });
+          const text = res.data != null ? String(res.data) : "";
+          if (typeof opts.writeVaultFile === "function") {
+            await opts.writeVaultFile(saveAs, text);
+          } else {
+            const target = path.join(root(), saveAs);
+            fs.mkdirSync(path.dirname(target), { recursive: true });
+            fs.writeFileSync(target, text, "utf8");
+          }
+          console.log("download success:", saveAs);
           console.log("downloaded:", saveAs);
         } catch (err) {
-          console.log("download failed:", remotePath, err.message);
+          console.error("download failed:", remotePath, err);
         }
       }
       async function deleteRemote(pathStr) {
@@ -15438,6 +15441,31 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 var { runSync } = require_sync();
+async function ensureVaultFoldersForPath(vault, filePath) {
+  const normalized = filePath.replace(/\\/g, "/");
+  const lastSlash = normalized.lastIndexOf("/");
+  if (lastSlash <= 0) return;
+  const folderPath = normalized.slice(0, lastSlash);
+  const segments = folderPath.split("/").filter(Boolean);
+  let acc = "";
+  for (const seg of segments) {
+    acc = acc ? `${acc}/${seg}` : seg;
+    const existing = vault.getAbstractFileByPath(acc);
+    if (!existing) {
+      await vault.createFolder(acc);
+    }
+  }
+}
+async function writeDownloadedFileToVault(vault, saveAs, content) {
+  const normalized = saveAs.replace(/\\/g, "/");
+  await ensureVaultFoldersForPath(vault, normalized);
+  const file = vault.getAbstractFileByPath(normalized);
+  if (file instanceof import_obsidian.TFile) {
+    await vault.modify(file, content);
+  } else {
+    await vault.create(normalized, content);
+  }
+}
 var DEFAULT_SETTINGS = {
   serverUrl: "http://localhost:3000"
 };
@@ -15504,7 +15532,10 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     process.env.SYNC_LOCAL_DIR = base;
     new import_obsidian.Notice("\u6B63\u5728\u540C\u6B65\u2026");
     try {
-      const r = await runSync({ server });
+      const r = await runSync({
+        server,
+        writeVaultFile: (saveAs, content) => writeDownloadedFileToVault(this.app.vault, saveAs, content)
+      });
       if (r.aborted) {
         new import_obsidian.Notice("\u540C\u6B65\u4E2D\u6B62\uFF1A\u65E0\u6CD5\u62C9\u53D6\u8FDC\u7AEF\u6587\u4EF6\u5217\u8868");
       } else {
