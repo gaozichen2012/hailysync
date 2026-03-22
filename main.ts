@@ -67,6 +67,28 @@ function normalizeRemoteMap(raw: SyncMetaMap): SyncMetaMap {
   return out;
 }
 
+/** 从 /files 响应体中取出「文件行」数组（顶层数组或常见包装字段，含一层嵌套对象） */
+function extractRemoteFilesArray(data: unknown, depth = 0): unknown[] | null {
+  if (depth > 6) return null;
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== 'object') return null;
+  const o = data as Record<string, unknown>;
+  for (const k of ['data', 'files', 'list', 'items', 'records', 'result']) {
+    const v = o[k];
+    if (Array.isArray(v)) return v;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      const inner = extractRemoteFilesArray(v, depth + 1);
+      if (inner) return inner;
+    }
+  }
+  return null;
+}
+
+function pathFromRemoteListItem(rec: Record<string, unknown>): string | null {
+  const p = rec.path ?? rec.filePath ?? rec.file;
+  return typeof p === 'string' && p.length > 0 ? p : null;
+}
+
 interface SyncPluginSettings {
   serverUrl: string;
 }
@@ -166,51 +188,47 @@ export default class ObsidianSyncPlugin extends Plugin {
       .filter(shouldSync);
   }
 
-  /** GET /files → 与本地 meta 同结构的 path → 条目映射 */
+  /** GET /files → 与本地 meta 同结构的 path → 条目映射（数组响应必先转为 map） */
   async fetchRemoteFiles(): Promise<SyncMetaMap> {
     const res = await axios.get(`${this.baseUrl}/files`, { responseType: 'json' });
     const data = res.data as unknown;
-    if (!data || typeof data !== 'object') return {};
 
-    if (Array.isArray(data)) {
-      const map: SyncMetaMap = {};
-      for (const item of data) {
+    const list = extractRemoteFilesArray(data);
+    if (list) {
+      const remoteFiles: SyncMetaMap = {};
+      for (const item of list) {
         if (!item || typeof item !== 'object') continue;
         const rec = item as Record<string, unknown>;
-        if (typeof rec.path !== 'string') continue;
-        const path = normalizeVaultPath(rec.path);
+        const pathRaw = pathFromRemoteListItem(rec);
+        if (!pathRaw) continue;
+        const path = normalizeVaultPath(pathRaw);
         if (!shouldSync(path)) continue;
-        map[path] = {
+        remoteFiles[path] = {
           hash: typeof rec.hash === 'string' ? rec.hash : '',
           updated_at: typeof rec.updated_at === 'number' ? rec.updated_at : Date.now(),
           deleted: rec.deleted === true,
         };
       }
-      return map;
+      console.log('remoteFiles map:', remoteFiles);
+      return remoteFiles;
+    }
+
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      const empty: SyncMetaMap = {};
+      console.log('remoteFiles map:', empty);
+      return empty;
     }
 
     const obj = data as Record<string, unknown>;
     const inner = obj.files;
-    if (Array.isArray(inner)) {
-      const map: SyncMetaMap = {};
-      for (const item of inner) {
-        if (!item || typeof item !== 'object') continue;
-        const rec = item as Record<string, unknown>;
-        if (typeof rec.path !== 'string') continue;
-        const path = normalizeVaultPath(rec.path);
-        if (!shouldSync(path)) continue;
-        map[path] = {
-          hash: typeof rec.hash === 'string' ? rec.hash : '',
-          updated_at: typeof rec.updated_at === 'number' ? rec.updated_at : Date.now(),
-          deleted: rec.deleted === true,
-        };
-      }
-      return map;
-    }
+    let remoteFiles: SyncMetaMap;
     if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
-      return normalizeRemoteMap(inner as SyncMetaMap);
+      remoteFiles = normalizeRemoteMap(inner as SyncMetaMap);
+    } else {
+      remoteFiles = normalizeRemoteMap(obj as SyncMetaMap);
     }
-    return normalizeRemoteMap(obj as SyncMetaMap);
+    console.log('remoteFiles map:', remoteFiles);
+    return remoteFiles;
   }
 
   async uploadFile(filePath: string, meta: SyncMetaMap): Promise<void> {

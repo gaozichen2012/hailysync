@@ -14922,6 +14922,25 @@ function normalizeRemoteMap(raw) {
   }
   return out;
 }
+function extractRemoteFilesArray(data, depth = 0) {
+  if (depth > 6) return null;
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== "object") return null;
+  const o = data;
+  for (const k of ["data", "files", "list", "items", "records", "result"]) {
+    const v = o[k];
+    if (Array.isArray(v)) return v;
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const inner = extractRemoteFilesArray(v, depth + 1);
+      if (inner) return inner;
+    }
+  }
+  return null;
+}
+function pathFromRemoteListItem(rec) {
+  const p = rec.path ?? rec.filePath ?? rec.file;
+  return typeof p === "string" && p.length > 0 ? p : null;
+}
 var DEFAULT_SETTINGS = {
   serverUrl: "http://localhost:3000"
 };
@@ -14991,49 +15010,44 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   listLocalFiles() {
     return this.app.vault.getMarkdownFiles().map((f) => normalizeVaultPath(f.path)).filter(shouldSync);
   }
-  /** GET /files → 与本地 meta 同结构的 path → 条目映射 */
+  /** GET /files → 与本地 meta 同结构的 path → 条目映射（数组响应必先转为 map） */
   async fetchRemoteFiles() {
     const res = await axios_default.get(`${this.baseUrl}/files`, { responseType: "json" });
     const data = res.data;
-    if (!data || typeof data !== "object") return {};
-    if (Array.isArray(data)) {
-      const map = {};
-      for (const item of data) {
+    const list = extractRemoteFilesArray(data);
+    if (list) {
+      const remoteFiles2 = {};
+      for (const item of list) {
         if (!item || typeof item !== "object") continue;
         const rec = item;
-        if (typeof rec.path !== "string") continue;
-        const path = normalizeVaultPath(rec.path);
+        const pathRaw = pathFromRemoteListItem(rec);
+        if (!pathRaw) continue;
+        const path = normalizeVaultPath(pathRaw);
         if (!shouldSync(path)) continue;
-        map[path] = {
+        remoteFiles2[path] = {
           hash: typeof rec.hash === "string" ? rec.hash : "",
           updated_at: typeof rec.updated_at === "number" ? rec.updated_at : Date.now(),
           deleted: rec.deleted === true
         };
       }
-      return map;
+      console.log("remoteFiles map:", remoteFiles2);
+      return remoteFiles2;
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      const empty = {};
+      console.log("remoteFiles map:", empty);
+      return empty;
     }
     const obj = data;
     const inner = obj.files;
-    if (Array.isArray(inner)) {
-      const map = {};
-      for (const item of inner) {
-        if (!item || typeof item !== "object") continue;
-        const rec = item;
-        if (typeof rec.path !== "string") continue;
-        const path = normalizeVaultPath(rec.path);
-        if (!shouldSync(path)) continue;
-        map[path] = {
-          hash: typeof rec.hash === "string" ? rec.hash : "",
-          updated_at: typeof rec.updated_at === "number" ? rec.updated_at : Date.now(),
-          deleted: rec.deleted === true
-        };
-      }
-      return map;
-    }
+    let remoteFiles;
     if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-      return normalizeRemoteMap(inner);
+      remoteFiles = normalizeRemoteMap(inner);
+    } else {
+      remoteFiles = normalizeRemoteMap(obj);
     }
-    return normalizeRemoteMap(obj);
+    console.log("remoteFiles map:", remoteFiles);
+    return remoteFiles;
   }
   async uploadFile(filePath, meta) {
     const normalized = normalizeVaultPath(filePath);
