@@ -270,7 +270,9 @@ class VaultSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Enable Sync')
-      .setDesc('关闭时不执行同步；开启后可使用下方「手动同步」或命令面板中的 Sync now。')
+      .setDesc(
+        '关闭时不执行同步（含启动延迟与每 60 秒自动同步）；开启后可使用下方「手动同步」或命令面板中的 Sync now。',
+      )
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
           this.plugin.settings.enableSync = value;
@@ -301,12 +303,22 @@ class VaultSyncSettingTab extends PluginSettingTab {
   }
 }
 
+const SYNC_STATUS_RESULT_MS = 3500;
+const AUTO_SYNC_INTERVAL_MS = 60_000;
+const AUTO_SYNC_START_MIN_MS = 2000;
+const AUTO_SYNC_START_MAX_MS = 5000;
+
 export default class ObsidianSyncPlugin extends Plugin {
   settings: SyncPluginSettings = DEFAULT_SETTINGS;
   private syncRunning = false;
+  private statusBarItem: HTMLElement | null = null;
+  private statusResultTimer: ReturnType<typeof window.setTimeout> | null = null;
+  private autoSyncStartupTimerId: ReturnType<typeof window.setTimeout> | null = null;
 
   async onload() {
     await this.loadSettings();
+
+    this.initSyncStatusBar();
 
     this.addSettingTab(new VaultSyncSettingTab(this.app, this));
 
@@ -317,6 +329,78 @@ export default class ObsidianSyncPlugin extends Plugin {
         void this.syncNow();
       },
     });
+
+    const startupDelay =
+      AUTO_SYNC_START_MIN_MS +
+      Math.floor(Math.random() * (AUTO_SYNC_START_MAX_MS - AUTO_SYNC_START_MIN_MS + 1));
+    this.autoSyncStartupTimerId = window.setTimeout(() => {
+      this.autoSyncStartupTimerId = null;
+      if (this.settings.enableSync) {
+        void this.syncNow({ auto: true });
+      }
+    }, startupDelay);
+    this.register(() => {
+      if (this.autoSyncStartupTimerId != null) {
+        window.clearTimeout(this.autoSyncStartupTimerId);
+        this.autoSyncStartupTimerId = null;
+      }
+    });
+
+    const intervalId = window.setInterval(() => {
+      if (!this.settings.enableSync) return;
+      void this.syncNow({ auto: true });
+    }, AUTO_SYNC_INTERVAL_MS);
+    this.registerInterval(intervalId);
+  }
+
+  onunload(): void {
+    this.clearStatusResultTimer();
+  }
+
+  private initSyncStatusBar(): void {
+    this.statusBarItem = this.addStatusBarItem();
+    this.setSyncStatusIdle();
+  }
+
+  private clearStatusResultTimer(): void {
+    if (this.statusResultTimer != null) {
+      window.clearTimeout(this.statusResultTimer);
+      this.statusResultTimer = null;
+    }
+  }
+
+  private setSyncStatusText(text: string): void {
+    if (this.statusBarItem) {
+      this.statusBarItem.textContent = text;
+    }
+  }
+
+  private setSyncStatusIdle(): void {
+    this.clearStatusResultTimer();
+    this.setSyncStatusText('🟢 Sync Idle');
+  }
+
+  private setSyncStatusSyncing(): void {
+    this.clearStatusResultTimer();
+    this.setSyncStatusText('🔄 Syncing...');
+  }
+
+  private setSyncStatusSuccess(): void {
+    this.clearStatusResultTimer();
+    this.setSyncStatusText('✔ Synced');
+    this.statusResultTimer = window.setTimeout(() => {
+      this.statusResultTimer = null;
+      this.setSyncStatusIdle();
+    }, SYNC_STATUS_RESULT_MS);
+  }
+
+  private setSyncStatusFailed(): void {
+    this.clearStatusResultTimer();
+    this.setSyncStatusText('❌ Sync Failed');
+    this.statusResultTimer = window.setTimeout(() => {
+      this.statusResultTimer = null;
+      this.setSyncStatusIdle();
+    }, SYNC_STATUS_RESULT_MS);
   }
 
   async loadSettings() {
@@ -501,7 +585,9 @@ export default class ObsidianSyncPlugin extends Plugin {
     }
   }
 
-  async syncNow() {
+  async syncNow(options?: { auto?: boolean }) {
+    const isAuto = options?.auto === true;
+
     if (this.syncRunning) {
       new Notice('同步已在进行中');
       return;
@@ -510,16 +596,22 @@ export default class ObsidianSyncPlugin extends Plugin {
 
     try {
       if (!this.settings.enableSync) {
+        this.setSyncStatusFailed();
         new Notice('❌ Sync Failed：同步已关闭，请先在设置中开启 Enable Sync');
+        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
 
       const server = this.baseUrl;
       if (!server) {
+        this.setSyncStatusFailed();
         new Notice('❌ Sync Failed：无效的服务器地址');
+        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
 
+      if (isAuto) console.log('[auto-sync] start');
+      this.setSyncStatusSyncing();
       new Notice('正在同步…');
 
       const meta = await this.loadMeta();
@@ -532,10 +624,12 @@ export default class ObsidianSyncPlugin extends Plugin {
         remote = await this.fetchRemoteFiles();
       } catch (err) {
         const detail = formatSyncError(err);
+        this.setSyncStatusFailed();
         new Notice(
           `❌ Sync Failed：无法连接服务器或拉取 /files（${server}）。${detail}`,
           8000,
         );
+        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
 
@@ -668,12 +762,18 @@ export default class ObsidianSyncPlugin extends Plugin {
           stepErrors.length <= 2
             ? stepErrors.join('；')
             : `${stepErrors.slice(0, 2).join('；')} 等共 ${stepErrors.length} 处`;
+        this.setSyncStatusFailed();
         new Notice(`❌ Sync Failed：部分文件同步失败（${preview}）`, 10000);
+        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
+      this.setSyncStatusSuccess();
       new Notice('✔ Sync Success');
+      if (isAuto) console.log('[auto-sync] success');
     } catch (e) {
+      this.setSyncStatusFailed();
       new Notice('❌ Sync Failed：' + formatSyncError(e), 8000);
+      if (isAuto) console.log('[auto-sync] failed');
     } finally {
       this.syncRunning = false;
     }

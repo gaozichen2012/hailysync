@@ -15066,7 +15066,9 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Vault Sync" });
-    new import_obsidian.Setting(containerEl).setName("Enable Sync").setDesc("\u5173\u95ED\u65F6\u4E0D\u6267\u884C\u540C\u6B65\uFF1B\u5F00\u542F\u540E\u53EF\u4F7F\u7528\u4E0B\u65B9\u300C\u624B\u52A8\u540C\u6B65\u300D\u6216\u547D\u4EE4\u9762\u677F\u4E2D\u7684 Sync now\u3002").addToggle(
+    new import_obsidian.Setting(containerEl).setName("Enable Sync").setDesc(
+      "\u5173\u95ED\u65F6\u4E0D\u6267\u884C\u540C\u6B65\uFF08\u542B\u542F\u52A8\u5EF6\u8FDF\u4E0E\u6BCF 60 \u79D2\u81EA\u52A8\u540C\u6B65\uFF09\uFF1B\u5F00\u542F\u540E\u53EF\u4F7F\u7528\u4E0B\u65B9\u300C\u624B\u52A8\u540C\u6B65\u300D\u6216\u547D\u4EE4\u9762\u677F\u4E2D\u7684 Sync now\u3002"
+    ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
         this.plugin.settings.enableSync = value;
         await this.plugin.saveSettings();
@@ -15087,11 +15089,19 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     );
   }
 };
+var SYNC_STATUS_RESULT_MS = 3500;
+var AUTO_SYNC_INTERVAL_MS = 6e4;
+var AUTO_SYNC_START_MIN_MS = 2e3;
+var AUTO_SYNC_START_MAX_MS = 5e3;
 var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   settings = DEFAULT_SETTINGS;
   syncRunning = false;
+  statusBarItem = null;
+  statusResultTimer = null;
+  autoSyncStartupTimerId = null;
   async onload() {
     await this.loadSettings();
+    this.initSyncStatusBar();
     this.addSettingTab(new VaultSyncSettingTab(this.app, this));
     this.addCommand({
       id: "sync-now",
@@ -15100,6 +15110,66 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         void this.syncNow();
       }
     });
+    const startupDelay = AUTO_SYNC_START_MIN_MS + Math.floor(Math.random() * (AUTO_SYNC_START_MAX_MS - AUTO_SYNC_START_MIN_MS + 1));
+    this.autoSyncStartupTimerId = window.setTimeout(() => {
+      this.autoSyncStartupTimerId = null;
+      if (this.settings.enableSync) {
+        void this.syncNow({ auto: true });
+      }
+    }, startupDelay);
+    this.register(() => {
+      if (this.autoSyncStartupTimerId != null) {
+        window.clearTimeout(this.autoSyncStartupTimerId);
+        this.autoSyncStartupTimerId = null;
+      }
+    });
+    const intervalId = window.setInterval(() => {
+      if (!this.settings.enableSync) return;
+      void this.syncNow({ auto: true });
+    }, AUTO_SYNC_INTERVAL_MS);
+    this.registerInterval(intervalId);
+  }
+  onunload() {
+    this.clearStatusResultTimer();
+  }
+  initSyncStatusBar() {
+    this.statusBarItem = this.addStatusBarItem();
+    this.setSyncStatusIdle();
+  }
+  clearStatusResultTimer() {
+    if (this.statusResultTimer != null) {
+      window.clearTimeout(this.statusResultTimer);
+      this.statusResultTimer = null;
+    }
+  }
+  setSyncStatusText(text) {
+    if (this.statusBarItem) {
+      this.statusBarItem.textContent = text;
+    }
+  }
+  setSyncStatusIdle() {
+    this.clearStatusResultTimer();
+    this.setSyncStatusText("\u{1F7E2} Sync Idle");
+  }
+  setSyncStatusSyncing() {
+    this.clearStatusResultTimer();
+    this.setSyncStatusText("\u{1F504} Syncing...");
+  }
+  setSyncStatusSuccess() {
+    this.clearStatusResultTimer();
+    this.setSyncStatusText("\u2714 Synced");
+    this.statusResultTimer = window.setTimeout(() => {
+      this.statusResultTimer = null;
+      this.setSyncStatusIdle();
+    }, SYNC_STATUS_RESULT_MS);
+  }
+  setSyncStatusFailed() {
+    this.clearStatusResultTimer();
+    this.setSyncStatusText("\u274C Sync Failed");
+    this.statusResultTimer = window.setTimeout(() => {
+      this.statusResultTimer = null;
+      this.setSyncStatusIdle();
+    }, SYNC_STATUS_RESULT_MS);
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -15253,7 +15323,8 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       await this.app.vault.delete(f);
     }
   }
-  async syncNow() {
+  async syncNow(options) {
+    const isAuto = options?.auto === true;
     if (this.syncRunning) {
       new import_obsidian.Notice("\u540C\u6B65\u5DF2\u5728\u8FDB\u884C\u4E2D");
       return;
@@ -15261,14 +15332,20 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     this.syncRunning = true;
     try {
       if (!this.settings.enableSync) {
+        this.setSyncStatusFailed();
         new import_obsidian.Notice("\u274C Sync Failed\uFF1A\u540C\u6B65\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F Enable Sync");
+        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
       const server = this.baseUrl;
       if (!server) {
+        this.setSyncStatusFailed();
         new import_obsidian.Notice("\u274C Sync Failed\uFF1A\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740");
+        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
+      if (isAuto) console.log("[auto-sync] start");
+      this.setSyncStatusSyncing();
       new import_obsidian.Notice("\u6B63\u5728\u540C\u6B65\u2026");
       const meta = await this.loadMeta();
       for (const k of Object.keys(meta)) {
@@ -15279,10 +15356,12 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         remote = await this.fetchRemoteFiles();
       } catch (err) {
         const detail = formatSyncError(err);
+        this.setSyncStatusFailed();
         new import_obsidian.Notice(
           `\u274C Sync Failed\uFF1A\u65E0\u6CD5\u8FDE\u63A5\u670D\u52A1\u5668\u6216\u62C9\u53D6 /files\uFF08${server}\uFF09\u3002${detail}`,
           8e3
         );
+        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
       const localPaths = this.listLocalFiles();
@@ -15396,12 +15475,18 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       await this.saveMeta(meta);
       if (stepErrors.length > 0) {
         const preview = stepErrors.length <= 2 ? stepErrors.join("\uFF1B") : `${stepErrors.slice(0, 2).join("\uFF1B")} \u7B49\u5171 ${stepErrors.length} \u5904`;
+        this.setSyncStatusFailed();
         new import_obsidian.Notice(`\u274C Sync Failed\uFF1A\u90E8\u5206\u6587\u4EF6\u540C\u6B65\u5931\u8D25\uFF08${preview}\uFF09`, 1e4);
+        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
+      this.setSyncStatusSuccess();
       new import_obsidian.Notice("\u2714 Sync Success");
+      if (isAuto) console.log("[auto-sync] success");
     } catch (e) {
+      this.setSyncStatusFailed();
       new import_obsidian.Notice("\u274C Sync Failed\uFF1A" + formatSyncError(e), 8e3);
+      if (isAuto) console.log("[auto-sync] failed");
     } finally {
       this.syncRunning = false;
     }
