@@ -7,7 +7,7 @@ import {
   TFile,
 } from 'obsidian';
 import type { Vault } from 'obsidian';
-import axios from 'axios';
+import axios, { isAxiosError } from 'axios';
 import md5 from 'blueimp-md5';
 
 /** 与 sync-server /files 及本地 .sync_meta.json 一致 */
@@ -228,13 +228,31 @@ function extractRemoteFilesMapPayload(parsed: unknown): SyncMetaMap {
   return out;
 }
 
+/** 内置默认 sync-server，用户未填写或清空时使用 */
+const BUILTIN_DEFAULT_SERVER_URL = 'http://120.77.77.185:3000';
+
 interface SyncPluginSettings {
   serverUrl: string;
+  /** 关闭时不执行同步（命令与手动同步均不跑） */
+  enableSync: boolean;
 }
 
 const DEFAULT_SETTINGS: SyncPluginSettings = {
-  serverUrl: 'http://localhost:3000',
+  serverUrl: BUILTIN_DEFAULT_SERVER_URL,
+  enableSync: true,
 };
+
+function formatSyncError(err: unknown): string {
+  if (isAxiosError(err)) {
+    const parts: string[] = [];
+    if (err.code) parts.push(err.code);
+    if (err.response?.status) parts.push(`HTTP ${err.response.status}`);
+    if (err.message) parts.push(err.message);
+    return parts.length > 0 ? parts.join(' · ') : '网络请求失败';
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return String(err);
+}
 
 class VaultSyncSettingTab extends PluginSettingTab {
   plugin: ObsidianSyncPlugin;
@@ -251,16 +269,32 @@ class VaultSyncSettingTab extends PluginSettingTab {
     containerEl.createEl('h2', { text: 'Vault Sync' });
 
     new Setting(containerEl)
-      .setName('同步服务器地址')
+      .setName('Enable Sync')
+      .setDesc('关闭时不执行同步；开启后可使用下方「手动同步」或命令面板中的 Sync now。')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
+          this.plugin.settings.enableSync = value;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl).setName('Manual Sync').setDesc('立即执行一次同步（不依赖自动触发）。').addButton((btn) =>
+      btn.setButtonText('Sync now').onClick(() => {
+        void this.plugin.syncNow();
+      }),
+    );
+
+    new Setting(containerEl)
+      .setName('Server URL')
       .setDesc(
-        'sync-server 根 URL，无末尾斜杠。需实现 GET /files、POST /upload、GET /download、POST /delete（JSON）。',
+        `可选。留空则使用内置地址 ${BUILTIN_DEFAULT_SERVER_URL}。需 sync-server 根 URL（无末尾斜杠）。`,
       )
       .addText((text) =>
         text
-          .setPlaceholder('http://localhost:3000')
+          .setPlaceholder(BUILTIN_DEFAULT_SERVER_URL)
           .setValue(this.plugin.settings.serverUrl)
           .onChange(async (value) => {
-            this.plugin.settings.serverUrl = value.trim() || DEFAULT_SETTINGS.serverUrl;
+            this.plugin.settings.serverUrl = value.trim() || BUILTIN_DEFAULT_SERVER_URL;
             await this.plugin.saveSettings();
           }),
       );
@@ -287,8 +321,11 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (typeof this.settings.enableSync !== 'boolean') {
+      this.settings.enableSync = DEFAULT_SETTINGS.enableSync;
+    }
     if (typeof this.settings.serverUrl !== 'string' || !this.settings.serverUrl.trim()) {
-      this.settings.serverUrl = DEFAULT_SETTINGS.serverUrl;
+      this.settings.serverUrl = BUILTIN_DEFAULT_SERVER_URL;
     } else {
       this.settings.serverUrl = this.settings.serverUrl.trim().replace(/\/+$/, '');
     }
@@ -472,9 +509,14 @@ export default class ObsidianSyncPlugin extends Plugin {
     this.syncRunning = true;
 
     try {
+      if (!this.settings.enableSync) {
+        new Notice('❌ Sync Failed：同步已关闭，请先在设置中开启 Enable Sync');
+        return;
+      }
+
       const server = this.baseUrl;
       if (!server) {
-        new Notice('请先在设置中填写同步服务器地址');
+        new Notice('❌ Sync Failed：无效的服务器地址');
         return;
       }
 
@@ -488,8 +530,12 @@ export default class ObsidianSyncPlugin extends Plugin {
       let remote: SyncMetaMap;
       try {
         remote = await this.fetchRemoteFiles();
-      } catch {
-        new Notice('同步中止：无法拉取远端 /files');
+      } catch (err) {
+        const detail = formatSyncError(err);
+        new Notice(
+          `❌ Sync Failed：无法连接服务器或拉取 /files（${server}）。${detail}`,
+          8000,
+        );
         return;
       }
 
@@ -506,6 +552,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       }
 
       const sortedPaths = [...pathSet].sort();
+      const stepErrors: string[] = [];
 
       for (const path of sortedPaths) {
         const abstract = this.app.vault.getAbstractFileByPath(path);
@@ -611,14 +658,22 @@ export default class ObsidianSyncPlugin extends Plugin {
           }
         } catch (e) {
           console.error('sync step failed:', path, e);
+          stepErrors.push(`${path}: ${formatSyncError(e)}`);
         }
       }
 
       await this.saveMeta(meta);
-      new Notice('同步完成');
+      if (stepErrors.length > 0) {
+        const preview =
+          stepErrors.length <= 2
+            ? stepErrors.join('；')
+            : `${stepErrors.slice(0, 2).join('；')} 等共 ${stepErrors.length} 处`;
+        new Notice(`❌ Sync Failed：部分文件同步失败（${preview}）`, 10000);
+        return;
+      }
+      new Notice('✔ Sync Success');
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      new Notice('同步失败：' + msg);
+      new Notice('❌ Sync Failed：' + formatSyncError(e), 8000);
     } finally {
       this.syncRunning = false;
     }

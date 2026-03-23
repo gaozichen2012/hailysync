@@ -15040,9 +15040,22 @@ function extractRemoteFilesMapPayload(parsed) {
   }
   return out;
 }
+var BUILTIN_DEFAULT_SERVER_URL = "http://120.77.77.185:3000";
 var DEFAULT_SETTINGS = {
-  serverUrl: "http://localhost:3000"
+  serverUrl: BUILTIN_DEFAULT_SERVER_URL,
+  enableSync: true
 };
+function formatSyncError(err) {
+  if (isAxiosError2(err)) {
+    const parts = [];
+    if (err.code) parts.push(err.code);
+    if (err.response?.status) parts.push(`HTTP ${err.response.status}`);
+    if (err.message) parts.push(err.message);
+    return parts.length > 0 ? parts.join(" \xB7 ") : "\u7F51\u7EDC\u8BF7\u6C42\u5931\u8D25";
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return String(err);
+}
 var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   plugin;
   constructor(app, plugin) {
@@ -15053,11 +15066,22 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Vault Sync" });
-    new import_obsidian.Setting(containerEl).setName("\u540C\u6B65\u670D\u52A1\u5668\u5730\u5740").setDesc(
-      "sync-server \u6839 URL\uFF0C\u65E0\u672B\u5C3E\u659C\u6760\u3002\u9700\u5B9E\u73B0 GET /files\u3001POST /upload\u3001GET /download\u3001POST /delete\uFF08JSON\uFF09\u3002"
+    new import_obsidian.Setting(containerEl).setName("Enable Sync").setDesc("\u5173\u95ED\u65F6\u4E0D\u6267\u884C\u540C\u6B65\uFF1B\u5F00\u542F\u540E\u53EF\u4F7F\u7528\u4E0B\u65B9\u300C\u624B\u52A8\u540C\u6B65\u300D\u6216\u547D\u4EE4\u9762\u677F\u4E2D\u7684 Sync now\u3002").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
+        this.plugin.settings.enableSync = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Manual Sync").setDesc("\u7ACB\u5373\u6267\u884C\u4E00\u6B21\u540C\u6B65\uFF08\u4E0D\u4F9D\u8D56\u81EA\u52A8\u89E6\u53D1\uFF09\u3002").addButton(
+      (btn) => btn.setButtonText("Sync now").onClick(() => {
+        void this.plugin.syncNow();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Server URL").setDesc(
+      `\u53EF\u9009\u3002\u7559\u7A7A\u5219\u4F7F\u7528\u5185\u7F6E\u5730\u5740 ${BUILTIN_DEFAULT_SERVER_URL}\u3002\u9700 sync-server \u6839 URL\uFF08\u65E0\u672B\u5C3E\u659C\u6760\uFF09\u3002`
     ).addText(
-      (text) => text.setPlaceholder("http://localhost:3000").setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
-        this.plugin.settings.serverUrl = value.trim() || DEFAULT_SETTINGS.serverUrl;
+      (text) => text.setPlaceholder(BUILTIN_DEFAULT_SERVER_URL).setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
+        this.plugin.settings.serverUrl = value.trim() || BUILTIN_DEFAULT_SERVER_URL;
         await this.plugin.saveSettings();
       })
     );
@@ -15079,8 +15103,11 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (typeof this.settings.enableSync !== "boolean") {
+      this.settings.enableSync = DEFAULT_SETTINGS.enableSync;
+    }
     if (typeof this.settings.serverUrl !== "string" || !this.settings.serverUrl.trim()) {
-      this.settings.serverUrl = DEFAULT_SETTINGS.serverUrl;
+      this.settings.serverUrl = BUILTIN_DEFAULT_SERVER_URL;
     } else {
       this.settings.serverUrl = this.settings.serverUrl.trim().replace(/\/+$/, "");
     }
@@ -15233,9 +15260,13 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     }
     this.syncRunning = true;
     try {
+      if (!this.settings.enableSync) {
+        new import_obsidian.Notice("\u274C Sync Failed\uFF1A\u540C\u6B65\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F Enable Sync");
+        return;
+      }
       const server = this.baseUrl;
       if (!server) {
-        new import_obsidian.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u540C\u6B65\u670D\u52A1\u5668\u5730\u5740");
+        new import_obsidian.Notice("\u274C Sync Failed\uFF1A\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740");
         return;
       }
       new import_obsidian.Notice("\u6B63\u5728\u540C\u6B65\u2026");
@@ -15246,8 +15277,12 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       let remote;
       try {
         remote = await this.fetchRemoteFiles();
-      } catch {
-        new import_obsidian.Notice("\u540C\u6B65\u4E2D\u6B62\uFF1A\u65E0\u6CD5\u62C9\u53D6\u8FDC\u7AEF /files");
+      } catch (err) {
+        const detail = formatSyncError(err);
+        new import_obsidian.Notice(
+          `\u274C Sync Failed\uFF1A\u65E0\u6CD5\u8FDE\u63A5\u670D\u52A1\u5668\u6216\u62C9\u53D6 /files\uFF08${server}\uFF09\u3002${detail}`,
+          8e3
+        );
         return;
       }
       const localPaths = this.listLocalFiles();
@@ -15262,6 +15297,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         if (shouldSync(k)) pathSet.add(normalizeVaultPath(k));
       }
       const sortedPaths = [...pathSet].sort();
+      const stepErrors = [];
       for (const path of sortedPaths) {
         const abstract = this.app.vault.getAbstractFileByPath(path);
         const localExists = abstract instanceof import_obsidian.TFile;
@@ -15354,13 +15390,18 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           }
         } catch (e) {
           console.error("sync step failed:", path, e);
+          stepErrors.push(`${path}: ${formatSyncError(e)}`);
         }
       }
       await this.saveMeta(meta);
-      new import_obsidian.Notice("\u540C\u6B65\u5B8C\u6210");
+      if (stepErrors.length > 0) {
+        const preview = stepErrors.length <= 2 ? stepErrors.join("\uFF1B") : `${stepErrors.slice(0, 2).join("\uFF1B")} \u7B49\u5171 ${stepErrors.length} \u5904`;
+        new import_obsidian.Notice(`\u274C Sync Failed\uFF1A\u90E8\u5206\u6587\u4EF6\u540C\u6B65\u5931\u8D25\uFF08${preview}\uFF09`, 1e4);
+        return;
+      }
+      new import_obsidian.Notice("\u2714 Sync Success");
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF1A" + msg);
+      new import_obsidian.Notice("\u274C Sync Failed\uFF1A" + formatSyncError(e), 8e3);
     } finally {
       this.syncRunning = false;
     }
