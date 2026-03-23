@@ -429,6 +429,26 @@ export default class ObsidianSyncPlugin extends Plugin {
     }
   }
 
+  /** 将远端内容写入 `原名.conflict.md`，不覆盖本地正文 */
+  async writeConflictFromRemote(filePath: string): Promise<void> {
+    const normalized = normalizeVaultPath(filePath);
+    const res = await axios.get(this.baseUrl + '/download', {
+      params: { path: normalized },
+      responseType: 'text',
+    });
+    const content = res.data || '';
+    const withoutMd = normalized.replace(/\.md$/i, '');
+    const conflictPath = `${withoutMd}.conflict.md`;
+    await ensureVaultFoldersForPath(this.app.vault, conflictPath);
+    const exists = this.app.vault.getAbstractFileByPath(conflictPath);
+    if (exists) {
+      await this.app.vault.adapter.write(conflictPath, content);
+    } else {
+      await this.app.vault.create(conflictPath, content);
+    }
+    console.log('sync decision:', normalized, 'conflict', 'WROTE_CONFLICT_COPY', conflictPath);
+  }
+
   async postDeleteRemote(filePath: string): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
     await axios.post(this.baseUrl + '/delete', {
@@ -506,6 +526,12 @@ export default class ObsidianSyncPlugin extends Plugin {
         try {
           if (remoteDeleted) {
             if (localExists) {
+              // 无 baseline：本地新建或从未记入 meta，远端仅剩删除墓碑 → 应上传，勿误删本地
+              if (!meta[path]) {
+                console.log('sync decision:', path, 'upload', 'LOCAL_NEW_REMOTE_TOMBSTONE');
+                await this.uploadFile(path, meta);
+                continue;
+              }
               console.log('sync decision:', path, 'delete_local', 'REMOTE_DELETED');
               await this.deleteLocalFile(path);
             }
@@ -544,7 +570,27 @@ export default class ObsidianSyncPlugin extends Plugin {
             const remoteHashStr =
               typeof r.hash === 'string' ? r.hash : String(r.hash ?? '');
             if (remoteHashStr !== localHash) {
-              console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED');
+              const baseRaw = meta[path]?.hash;
+              const baseStr =
+                typeof baseRaw === 'string' ? baseRaw : baseRaw != null ? String(baseRaw) : '';
+              const hasBase = baseStr.length > 0;
+
+              if (hasBase && baseStr !== localHash && baseStr !== remoteHashStr) {
+                console.log('sync decision:', path, 'conflict', 'BOTH_MODIFIED');
+                await this.writeConflictFromRemote(path);
+                continue;
+              }
+              if (hasBase && baseStr === localHash) {
+                console.log('sync decision:', path, 'download', 'REMOTE_MODIFIED');
+                await this.downloadFile(path, meta);
+                continue;
+              }
+              if (hasBase && baseStr === remoteHashStr) {
+                console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED');
+                await this.uploadFile(path, meta);
+                continue;
+              }
+              console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED_OR_NO_BASE');
               await this.uploadFile(path, meta);
               continue;
             }
