@@ -15088,15 +15088,177 @@ function formatSyncError(err) {
   if (err instanceof Error && err.message) return err.message;
   return String(err);
 }
+var BINDING_CODE_TTL_MS = 3e4;
+var BINDING_COPY_FEEDBACK_MS = 2500;
 var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   plugin;
+  /** 当前展示的绑定码（不落盘） */
+  bindingCode = null;
+  /** 绑定码界面隐藏时间戳（毫秒） */
+  bindingExpireAt = null;
+  bindingError = null;
+  bindingCopyFeedback = null;
+  bindingExpiredHint = false;
+  bindingPanelEl = null;
+  bindingCountdownInterval = null;
+  bindingHideTimeout = null;
+  bindingCopyFeedbackTimeout = null;
+  bindingRequestGen = 0;
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this.plugin.register(() => this.clearBindingTimers());
+  }
+  clearBindingTimers() {
+    if (this.bindingCountdownInterval != null) {
+      window.clearInterval(this.bindingCountdownInterval);
+      this.bindingCountdownInterval = null;
+    }
+    if (this.bindingHideTimeout != null) {
+      window.clearTimeout(this.bindingHideTimeout);
+      this.bindingHideTimeout = null;
+    }
+    if (this.bindingCopyFeedbackTimeout != null) {
+      window.clearTimeout(this.bindingCopyFeedbackTimeout);
+      this.bindingCopyFeedbackTimeout = null;
+    }
+  }
+  syncBindingExpiryState() {
+    if (this.bindingCode && this.bindingExpireAt != null && Date.now() >= this.bindingExpireAt) {
+      this.bindingCode = null;
+      this.bindingExpireAt = null;
+      this.bindingExpiredHint = true;
+    }
+  }
+  renderBindingPanel() {
+    const panel = this.bindingPanelEl;
+    if (!panel) return;
+    panel.empty();
+    if (this.bindingError) {
+      panel.createEl("div", {
+        cls: "setting-item-description vault-sync-binding-error",
+        text: this.bindingError
+      });
+    }
+    if (this.bindingCopyFeedback) {
+      panel.createEl("div", {
+        cls: "setting-item-description vault-sync-binding-copy-ok",
+        text: this.bindingCopyFeedback
+      });
+    }
+    this.syncBindingExpiryState();
+    if (this.bindingCode && this.bindingExpireAt != null && Date.now() < this.bindingExpireAt) {
+      panel.createEl("div", {
+        cls: "setting-item-description vault-sync-binding-success",
+        text: "\u751F\u6210\u6210\u529F"
+      });
+      const row = panel.createDiv({ cls: "vault-sync-binding-code-row" });
+      row.createSpan({ text: "\u7ED1\u5B9A\u7801\uFF1A" });
+      row.createSpan({
+        cls: "vault-sync-binding-code",
+        text: this.bindingCode
+      });
+      const copyBtn = row.createEl("button", {
+        cls: "vault-sync-binding-copy-btn",
+        text: "\u590D\u5236",
+        type: "button"
+      });
+      copyBtn.addEventListener("click", () => {
+        void this.copyBindingCodeToClipboard(this.bindingCode ?? "");
+      });
+      const sec = Math.max(
+        0,
+        Math.ceil((this.bindingExpireAt - Date.now()) / 1e3)
+      );
+      row.createSpan({
+        cls: "vault-sync-binding-countdown",
+        text: `\uFF08${sec}s \u540E\u81EA\u52A8\u5931\u6548\uFF09`
+      });
+    } else if (this.bindingExpiredHint) {
+      panel.createEl("div", {
+        cls: "setting-item-description vault-sync-binding-expired",
+        text: "\u7ED1\u5B9A\u7801\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210"
+      });
+    }
+  }
+  scheduleBindingTimersIfNeeded() {
+    if (!this.bindingCode || this.bindingExpireAt == null) return;
+    const remain = this.bindingExpireAt - Date.now();
+    if (remain <= 0) {
+      this.bindingCode = null;
+      this.bindingExpiredHint = true;
+      this.renderBindingPanel();
+      return;
+    }
+    this.bindingHideTimeout = window.setTimeout(() => {
+      this.bindingHideTimeout = null;
+      this.bindingCode = null;
+      this.bindingExpireAt = null;
+      this.bindingExpiredHint = true;
+      if (this.bindingCountdownInterval != null) {
+        window.clearInterval(this.bindingCountdownInterval);
+        this.bindingCountdownInterval = null;
+      }
+      this.renderBindingPanel();
+    }, remain);
+    this.bindingCountdownInterval = window.setInterval(() => {
+      this.syncBindingExpiryState();
+      if (!this.bindingCode) {
+        this.clearBindingTimers();
+        this.renderBindingPanel();
+        return;
+      }
+      this.renderBindingPanel();
+    }, 1e3);
+  }
+  async copyBindingCodeToClipboard(code) {
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      this.bindingCopyFeedback = "\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F";
+      if (this.bindingCopyFeedbackTimeout != null) {
+        window.clearTimeout(this.bindingCopyFeedbackTimeout);
+      }
+      this.bindingCopyFeedbackTimeout = window.setTimeout(() => {
+        this.bindingCopyFeedbackTimeout = null;
+        this.bindingCopyFeedback = null;
+        this.renderBindingPanel();
+      }, BINDING_COPY_FEEDBACK_MS);
+      this.renderBindingPanel();
+    } catch {
+      this.bindingCopyFeedback = null;
+      this.bindingError = "\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u4E2D\u7ED1\u5B9A\u7801\u590D\u5236";
+      this.renderBindingPanel();
+    }
+  }
+  async requestBindingCode() {
+    const gen = ++this.bindingRequestGen;
+    this.clearBindingTimers();
+    this.bindingError = null;
+    this.bindingCopyFeedback = null;
+    this.bindingExpiredHint = false;
+    this.renderBindingPanel();
+    const result = await this.plugin.requestCreateBindingCode();
+    if (gen !== this.bindingRequestGen) return;
+    if (result.ok) {
+      this.bindingCode = result.code;
+      this.bindingExpireAt = Date.now() + BINDING_CODE_TTL_MS;
+      this.bindingError = null;
+    } else {
+      this.bindingCode = null;
+      this.bindingExpireAt = null;
+      this.bindingError = result.message;
+    }
+    this.renderBindingPanel();
+    this.scheduleBindingTimersIfNeeded();
   }
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    this.clearBindingTimers();
+    this.bindingPanelEl = null;
+    this.bindingCopyFeedback = null;
+    this.syncBindingExpiryState();
     containerEl.createEl("h2", { text: "Vault Sync" });
     const identitySection = containerEl.createDiv();
     identitySection.createEl("div", {
@@ -15110,11 +15272,15 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         text: `\u5F53\u524D user_id\uFF1A${this.plugin.userId}`
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u751F\u6210\u7ED1\u5B9A\u7801").setDesc("\u5728\u5F53\u524D\u8BBE\u5907\u5411\u670D\u52A1\u7AEF\u7533\u8BF7\u4E00\u6B21\u6027\u7ED1\u5B9A\u7801\uFF0C\u4F9B\u53E6\u4E00\u53F0\u8BBE\u5907\u8F93\u5165\u540E\u5171\u4EAB\u540C\u4E00 user_id\u3002\u7ED1\u5B9A\u7801\u4EC5\u663E\u793A\u3001\u4E0D\u7F13\u5B58\u3002").addButton(
+    const bindingBlock = containerEl.createDiv({ cls: "vault-sync-binding-block" });
+    new import_obsidian.Setting(bindingBlock).setName("\u751F\u6210\u7ED1\u5B9A\u7801").setDesc("\u5728\u5F53\u524D\u8BBE\u5907\u5411\u670D\u52A1\u7AEF\u7533\u8BF7\u4E00\u6B21\u6027\u7ED1\u5B9A\u7801\uFF0C\u4F9B\u53E6\u4E00\u53F0\u8BBE\u5907\u8F93\u5165\u540E\u5171\u4EAB\u540C\u4E00 user_id\u3002\u7ED1\u5B9A\u7801\u4EC5\u663E\u793A\u3001\u4E0D\u7F13\u5B58\u3002").addButton(
       (btn) => btn.setButtonText("\u751F\u6210\u7ED1\u5B9A\u7801").onClick(() => {
-        void this.plugin.createBindingCode();
+        void this.requestBindingCode();
       })
     );
+    this.bindingPanelEl = bindingBlock.createDiv({ cls: "vault-sync-binding-panel" });
+    this.renderBindingPanel();
+    this.scheduleBindingTimersIfNeeded();
     let bindingInput = null;
     new import_obsidian.Setting(containerEl).setName("\u7ED1\u5B9A\u5230\u65B0\u8BBE\u5907\uFF08\u8F93\u5165\u7ED1\u5B9A\u7801\uFF09").setDesc("\u5728\u65B0\u8BBE\u5907\u4E0A\u8F93\u5165\u65E7\u8BBE\u5907\u751F\u6210\u7684\u7ED1\u5B9A\u7801\u540E\u786E\u8BA4\uFF0C\u5C06\u7528\u8FD4\u56DE\u7684 user_id \u8986\u76D6\u672C\u5730\u914D\u7F6E\u5E76\u7ACB\u5373\u751F\u6548\uFF08\u4E0D\u505A\u6570\u636E\u8FC1\u79FB\uFF09\u3002").addText((text) => {
       bindingInput = text.inputEl;
@@ -15282,12 +15448,12 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     if (!this.userId) throw new Error("user_id \u672A\u521D\u59CB\u5316");
     return { user_id: this.userId };
   }
-  async createBindingCode() {
+  /** 创建绑定码（仅请求；展示与倒计时由设置页负责） */
+  async requestCreateBindingCode() {
     await this.ensureSyncIdentity();
     const server = this.baseUrl;
     if (!server) {
-      new import_obsidian.Notice("\u751F\u6210\u7ED1\u5B9A\u7801\u5931\u8D25\uFF1A\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740", 6e3);
-      return;
+      return { ok: false, message: "\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740" };
     }
     try {
       const res = await axios_default.post(
@@ -15297,12 +15463,11 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       );
       const code = res.data?.code;
       if (typeof code !== "string" || code.trim() === "") {
-        new import_obsidian.Notice("\u751F\u6210\u7ED1\u5B9A\u7801\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548\u7ED1\u5B9A\u7801", 6e3);
-        return;
+        return { ok: false, message: "\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548\u7ED1\u5B9A\u7801" };
       }
-      new import_obsidian.Notice(`\u7ED1\u5B9A\u7801\uFF08\u8BF7\u5728\u65B0\u8BBE\u5907\u8F93\u5165\uFF09\uFF1A${code.trim()}`, 25e3);
+      return { ok: true, code: code.trim() };
     } catch (e) {
-      new import_obsidian.Notice("\u751F\u6210\u7ED1\u5B9A\u7801\u5931\u8D25\uFF1A" + formatSyncError(e), 8e3);
+      return { ok: false, message: formatSyncError(e) };
     }
   }
   /** @returns 是否绑定成功（用于刷新设置页） */

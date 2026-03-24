@@ -259,6 +259,10 @@ const DEFAULT_SETTINGS: SyncPluginSettings = {
   enableSync: true,
 };
 
+type CreateBindingCodeResult =
+  | { ok: true; code: string }
+  | { ok: false; message: string };
+
 function formatSyncError(err: unknown): string {
   if (isAxiosError(err)) {
     const data = err.response?.data;
@@ -293,17 +297,204 @@ function formatSyncError(err: unknown): string {
   return String(err);
 }
 
+const BINDING_CODE_TTL_MS = 30_000;
+const BINDING_COPY_FEEDBACK_MS = 2500;
+
 class VaultSyncSettingTab extends PluginSettingTab {
   plugin: ObsidianSyncPlugin;
+
+  /** 当前展示的绑定码（不落盘） */
+  private bindingCode: string | null = null;
+  /** 绑定码界面隐藏时间戳（毫秒） */
+  private bindingExpireAt: number | null = null;
+  private bindingError: string | null = null;
+  private bindingCopyFeedback: string | null = null;
+  private bindingExpiredHint = false;
+  private bindingPanelEl: HTMLElement | null = null;
+  private bindingCountdownInterval: ReturnType<typeof window.setInterval> | null = null;
+  private bindingHideTimeout: ReturnType<typeof window.setTimeout> | null = null;
+  private bindingCopyFeedbackTimeout: ReturnType<typeof window.setTimeout> | null = null;
+  private bindingRequestGen = 0;
 
   constructor(app: App, plugin: ObsidianSyncPlugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this.plugin.register(() => this.clearBindingTimers());
+  }
+
+  private clearBindingTimers(): void {
+    if (this.bindingCountdownInterval != null) {
+      window.clearInterval(this.bindingCountdownInterval);
+      this.bindingCountdownInterval = null;
+    }
+    if (this.bindingHideTimeout != null) {
+      window.clearTimeout(this.bindingHideTimeout);
+      this.bindingHideTimeout = null;
+    }
+    if (this.bindingCopyFeedbackTimeout != null) {
+      window.clearTimeout(this.bindingCopyFeedbackTimeout);
+      this.bindingCopyFeedbackTimeout = null;
+    }
+  }
+
+  private syncBindingExpiryState(): void {
+    if (
+      this.bindingCode &&
+      this.bindingExpireAt != null &&
+      Date.now() >= this.bindingExpireAt
+    ) {
+      this.bindingCode = null;
+      this.bindingExpireAt = null;
+      this.bindingExpiredHint = true;
+    }
+  }
+
+  private renderBindingPanel(): void {
+    const panel = this.bindingPanelEl;
+    if (!panel) return;
+    panel.empty();
+
+    if (this.bindingError) {
+      panel.createEl('div', {
+        cls: 'setting-item-description vault-sync-binding-error',
+        text: this.bindingError,
+      });
+    }
+
+    if (this.bindingCopyFeedback) {
+      panel.createEl('div', {
+        cls: 'setting-item-description vault-sync-binding-copy-ok',
+        text: this.bindingCopyFeedback,
+      });
+    }
+
+    this.syncBindingExpiryState();
+
+    if (
+      this.bindingCode &&
+      this.bindingExpireAt != null &&
+      Date.now() < this.bindingExpireAt
+    ) {
+      panel.createEl('div', {
+        cls: 'setting-item-description vault-sync-binding-success',
+        text: '生成成功',
+      });
+
+      const row = panel.createDiv({ cls: 'vault-sync-binding-code-row' });
+      row.createSpan({ text: '绑定码：' });
+      row.createSpan({
+        cls: 'vault-sync-binding-code',
+        text: this.bindingCode,
+      });
+      const copyBtn = row.createEl('button', {
+        cls: 'vault-sync-binding-copy-btn',
+        text: '复制',
+        type: 'button',
+      });
+      copyBtn.addEventListener('click', () => {
+        void this.copyBindingCodeToClipboard(this.bindingCode ?? '');
+      });
+
+      const sec = Math.max(
+        0,
+        Math.ceil((this.bindingExpireAt - Date.now()) / 1000),
+      );
+      row.createSpan({
+        cls: 'vault-sync-binding-countdown',
+        text: `（${sec}s 后自动失效）`,
+      });
+    } else if (this.bindingExpiredHint) {
+      panel.createEl('div', {
+        cls: 'setting-item-description vault-sync-binding-expired',
+        text: '绑定码已失效，请重新生成',
+      });
+    }
+  }
+
+  private scheduleBindingTimersIfNeeded(): void {
+    if (!this.bindingCode || this.bindingExpireAt == null) return;
+    const remain = this.bindingExpireAt - Date.now();
+    if (remain <= 0) {
+      this.bindingCode = null;
+      this.bindingExpiredHint = true;
+      this.renderBindingPanel();
+      return;
+    }
+
+    this.bindingHideTimeout = window.setTimeout(() => {
+      this.bindingHideTimeout = null;
+      this.bindingCode = null;
+      this.bindingExpireAt = null;
+      this.bindingExpiredHint = true;
+      if (this.bindingCountdownInterval != null) {
+        window.clearInterval(this.bindingCountdownInterval);
+        this.bindingCountdownInterval = null;
+      }
+      this.renderBindingPanel();
+    }, remain);
+
+    this.bindingCountdownInterval = window.setInterval(() => {
+      this.syncBindingExpiryState();
+      if (!this.bindingCode) {
+        this.clearBindingTimers();
+        this.renderBindingPanel();
+        return;
+      }
+      this.renderBindingPanel();
+    }, 1000);
+  }
+
+  private async copyBindingCodeToClipboard(code: string): Promise<void> {
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      this.bindingCopyFeedback = '已复制到剪贴板';
+      if (this.bindingCopyFeedbackTimeout != null) {
+        window.clearTimeout(this.bindingCopyFeedbackTimeout);
+      }
+      this.bindingCopyFeedbackTimeout = window.setTimeout(() => {
+        this.bindingCopyFeedbackTimeout = null;
+        this.bindingCopyFeedback = null;
+        this.renderBindingPanel();
+      }, BINDING_COPY_FEEDBACK_MS);
+      this.renderBindingPanel();
+    } catch {
+      this.bindingCopyFeedback = null;
+      this.bindingError = '复制失败，请手动选中绑定码复制';
+      this.renderBindingPanel();
+    }
+  }
+
+  private async requestBindingCode(): Promise<void> {
+    const gen = ++this.bindingRequestGen;
+    this.clearBindingTimers();
+    this.bindingError = null;
+    this.bindingCopyFeedback = null;
+    this.bindingExpiredHint = false;
+    this.renderBindingPanel();
+
+    const result = await this.plugin.requestCreateBindingCode();
+    if (gen !== this.bindingRequestGen) return;
+    if (result.ok) {
+      this.bindingCode = result.code;
+      this.bindingExpireAt = Date.now() + BINDING_CODE_TTL_MS;
+      this.bindingError = null;
+    } else {
+      this.bindingCode = null;
+      this.bindingExpireAt = null;
+      this.bindingError = result.message;
+    }
+    this.renderBindingPanel();
+    this.scheduleBindingTimersIfNeeded();
   }
 
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+    this.clearBindingTimers();
+    this.bindingPanelEl = null;
+    this.bindingCopyFeedback = null;
+    this.syncBindingExpiryState();
 
     containerEl.createEl('h2', { text: 'Vault Sync' });
 
@@ -320,14 +511,18 @@ class VaultSyncSettingTab extends PluginSettingTab {
       });
     });
 
-    new Setting(containerEl)
+    const bindingBlock = containerEl.createDiv({ cls: 'vault-sync-binding-block' });
+    new Setting(bindingBlock)
       .setName('生成绑定码')
       .setDesc('在当前设备向服务端申请一次性绑定码，供另一台设备输入后共享同一 user_id。绑定码仅显示、不缓存。')
       .addButton((btn) =>
         btn.setButtonText('生成绑定码').onClick(() => {
-          void this.plugin.createBindingCode();
+          void this.requestBindingCode();
         }),
       );
+    this.bindingPanelEl = bindingBlock.createDiv({ cls: 'vault-sync-binding-panel' });
+    this.renderBindingPanel();
+    this.scheduleBindingTimersIfNeeded();
 
     let bindingInput: HTMLInputElement | null = null;
     new Setting(containerEl)
@@ -542,12 +737,12 @@ export default class ObsidianSyncPlugin extends Plugin {
     return { user_id: this.userId };
   }
 
-  async createBindingCode(): Promise<void> {
+  /** 创建绑定码（仅请求；展示与倒计时由设置页负责） */
+  async requestCreateBindingCode(): Promise<CreateBindingCodeResult> {
     await this.ensureSyncIdentity();
     const server = this.baseUrl;
     if (!server) {
-      new Notice('生成绑定码失败：无效的服务器地址', 6000);
-      return;
+      return { ok: false, message: '无效的服务器地址' };
     }
     try {
       const res = await axios.post<{ code?: string }>(
@@ -557,12 +752,11 @@ export default class ObsidianSyncPlugin extends Plugin {
       );
       const code = res.data?.code;
       if (typeof code !== 'string' || code.trim() === '') {
-        new Notice('生成绑定码失败：服务端未返回有效绑定码', 6000);
-        return;
+        return { ok: false, message: '服务端未返回有效绑定码' };
       }
-      new Notice(`绑定码（请在新设备输入）：${code.trim()}`, 25000);
+      return { ok: true, code: code.trim() };
     } catch (e) {
-      new Notice('生成绑定码失败：' + formatSyncError(e), 8000);
+      return { ok: false, message: formatSyncError(e) };
     }
   }
 

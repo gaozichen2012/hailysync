@@ -1,1 +1,45 @@
-/* obsidian-sync-plugin — 预留样式 */
+.vault-sync-binding-panel {
+	margin-top: 0.5em;
+}
+
+.vault-sync-binding-error {
+	color: var(--text-error);
+}
+
+.vault-sync-binding-copy-ok {
+	color: var(--text-accent);
+}
+
+.vault-sync-binding-success {
+	color: var(--text-success);
+}
+
+.vault-sync-binding-code-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.45em 0.75em;
+	margin-top: 0.35em;
+}
+
+.vault-sync-binding-code {
+	font-family: var(--font-monospace-theme), var(--font-monospace), ui-monospace, monospace;
+	letter-spacing: 0.07em;
+}
+
+.vault-sync-binding-copy-btn {
+	margin: 0;
+	padding: 0.15em 0.65em;
+	font-size: var(--font-ui-small);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+
+.vault-sync-binding-countdown {
+	font-size: var(--font-ui-small);
+	opacity: 0.88;
+}
+
+.vault-sync-binding-expired {
+	opacity: 0.88;
+}
