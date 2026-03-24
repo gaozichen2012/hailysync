@@ -20,6 +20,22 @@ interface SyncFileMeta {
 type SyncMetaMap = Record<string, SyncFileMeta>;
 
 const SYNC_META_FILENAME = '.sync_meta.json';
+/** 本地身份配置（不参与笔记同步，避免经同步服务覆盖各端 user_id） */
+const SYNC_CONFIG_FILENAME = '.sync_config.json';
+
+interface SyncIdentityConfig {
+  user_id: string;
+}
+
+function generateUserId(): string {
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0;
+    const v = ch === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 async function ensureVaultFoldersForPath(vault: Vault, filePath: string): Promise<void> {
   const normalized = filePath.replace(/\\/g, '/');
@@ -48,6 +64,7 @@ function shouldSync(filePath: string): boolean {
   if (p.startsWith('.')) return false;
   if (p.includes('.obsidian')) return false;
   if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return false;
+  if (p === SYNC_CONFIG_FILENAME || p.endsWith(`/${SYNC_CONFIG_FILENAME}`)) return false;
   return true;
 }
 
@@ -244,6 +261,17 @@ const DEFAULT_SETTINGS: SyncPluginSettings = {
 
 function formatSyncError(err: unknown): string {
   if (isAxiosError(err)) {
+    const data = err.response?.data;
+    if (typeof data === 'string' && data.trim()) {
+      const s = data.trim();
+      if (s.length <= 200) return s;
+    }
+    if (isPlainObjectRecord(data as unknown)) {
+      const msg = (data as { message?: unknown }).message;
+      if (typeof msg === 'string' && msg.trim()) return msg.trim();
+      const errMsg = (data as { error?: unknown }).error;
+      if (typeof errMsg === 'string' && errMsg.trim()) return errMsg.trim();
+    }
     const parts: string[] = [];
     if (err.code) parts.push(err.code);
     if (err.response?.status) parts.push(`HTTP ${err.response.status}`);
@@ -267,6 +295,45 @@ class VaultSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     containerEl.createEl('h2', { text: 'Vault Sync' });
+
+    const identitySection = containerEl.createDiv();
+    identitySection.createEl('div', {
+      cls: 'setting-item-description',
+      text: '正在读取身份…',
+    });
+    void this.plugin.ensureSyncIdentity().then(() => {
+      identitySection.empty();
+      identitySection.createEl('div', {
+        cls: 'setting-item-description',
+        text: `当前 user_id：${this.plugin.userId}`,
+      });
+    });
+
+    new Setting(containerEl)
+      .setName('生成绑定码')
+      .setDesc('在当前设备向服务端申请一次性绑定码，供另一台设备输入后共享同一 user_id。绑定码仅显示、不缓存。')
+      .addButton((btn) =>
+        btn.setButtonText('生成绑定码').onClick(() => {
+          void this.plugin.createBindingCode();
+        }),
+      );
+
+    let bindingInput: HTMLInputElement | null = null;
+    new Setting(containerEl)
+      .setName('绑定到新设备（输入绑定码）')
+      .setDesc('在新设备上输入旧设备生成的绑定码后确认，将用返回的 user_id 覆盖本地配置并立即生效（不做数据迁移）。')
+      .addText((text) => {
+        bindingInput = text.inputEl;
+        text.setPlaceholder('绑定码');
+      })
+      .addButton((btn) =>
+        btn.setButtonText('确认绑定').onClick(() => {
+          const code = bindingInput?.value?.trim() ?? '';
+          void this.plugin.consumeBindingCode(code).then((ok) => {
+            if (ok) this.display();
+          });
+        }),
+      );
 
     new Setting(containerEl)
       .setName('Enable Sync')
@@ -310,6 +377,8 @@ const AUTO_SYNC_START_MAX_MS = 5000;
 
 export default class ObsidianSyncPlugin extends Plugin {
   settings: SyncPluginSettings = DEFAULT_SETTINGS;
+  /** 由 `.sync_config.json` 加载或生成；仅绑定成功时覆盖 */
+  userId = '';
   private syncRunning = false;
   private statusBarItem: HTMLElement | null = null;
   private statusResultTimer: ReturnType<typeof window.setTimeout> | null = null;
@@ -317,6 +386,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    await this.ensureSyncIdentity();
 
     this.initSyncStatusBar();
 
@@ -423,6 +493,97 @@ export default class ObsidianSyncPlugin extends Plugin {
     return this.settings.serverUrl.trim().replace(/\/+$/, '');
   }
 
+  /** 启动或首次需要时读取/生成 user_id 并写入 `.sync_config.json` */
+  async ensureSyncIdentity(): Promise<string> {
+    if (this.userId) return this.userId;
+    try {
+      const raw = await this.app.vault.adapter.read(SYNC_CONFIG_FILENAME);
+      const parsed = JSON.parse(raw || '{}') as unknown;
+      if (
+        isPlainObjectRecord(parsed) &&
+        typeof parsed.user_id === 'string' &&
+        parsed.user_id.trim() !== ''
+      ) {
+        this.userId = parsed.user_id.trim();
+        return this.userId;
+      }
+    } catch {
+      /* 不存在或无法读取 */
+    }
+    const id = generateUserId();
+    await this.persistSyncIdentity(id);
+    return this.userId;
+  }
+
+  /** 仅绑定成功时调用：覆盖内存与本地配置 */
+  async persistSyncIdentity(userId: string): Promise<void> {
+    const next = userId.trim();
+    if (!next) throw new Error('user_id 无效');
+    this.userId = next;
+    await this.app.vault.adapter.write(
+      SYNC_CONFIG_FILENAME,
+      JSON.stringify({ user_id: this.userId } satisfies SyncIdentityConfig, null, 2),
+    );
+  }
+
+  private syncQueryParams(): { user_id: string } {
+    if (!this.userId) throw new Error('user_id 未初始化');
+    return { user_id: this.userId };
+  }
+
+  async createBindingCode(): Promise<void> {
+    await this.ensureSyncIdentity();
+    const server = this.baseUrl;
+    if (!server) {
+      new Notice('生成绑定码失败：无效的服务器地址', 6000);
+      return;
+    }
+    try {
+      const res = await axios.post<{ code?: string }>(`${server}/binding-code/create`, {
+        user_id: this.userId,
+      });
+      const code = res.data?.code;
+      if (typeof code !== 'string' || code.trim() === '') {
+        new Notice('生成绑定码失败：服务端未返回有效绑定码', 6000);
+        return;
+      }
+      new Notice(`绑定码（请在新设备输入）：${code.trim()}`, 25000);
+    } catch (e) {
+      new Notice('生成绑定码失败：' + formatSyncError(e), 8000);
+    }
+  }
+
+  /** @returns 是否绑定成功（用于刷新设置页） */
+  async consumeBindingCode(rawCode: string): Promise<boolean> {
+    await this.ensureSyncIdentity();
+    const code = rawCode.trim();
+    if (!code) {
+      new Notice('请输入绑定码');
+      return false;
+    }
+    const server = this.baseUrl;
+    if (!server) {
+      new Notice('绑定失败：无效的服务器地址', 6000);
+      return false;
+    }
+    try {
+      const res = await axios.post<{ user_id?: string }>(`${server}/binding-code/consume`, {
+        code,
+      });
+      const uid = res.data?.user_id;
+      if (typeof uid !== 'string' || uid.trim() === '') {
+        new Notice('绑定失败：服务端未返回有效 user_id', 6000);
+        return false;
+      }
+      await this.persistSyncIdentity(uid.trim());
+      new Notice('已绑定：后续同步将使用新的 user_id', 8000);
+      return true;
+    } catch (e) {
+      new Notice('绑定失败：' + formatSyncError(e), 8000);
+      return false;
+    }
+  }
+
   async loadMeta(): Promise<SyncMetaMap> {
     try {
       const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
@@ -450,7 +611,10 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   /** GET /files → path→meta 映射（仅 map；解析一次后 normalize，不再覆盖） */
   async fetchRemoteFiles(): Promise<SyncMetaMap> {
-    const res = await axios.get(this.baseUrl + '/files', { responseType: 'text' });
+    const res = await axios.get(this.baseUrl + '/files', {
+      params: this.syncQueryParams(),
+      responseType: 'text',
+    });
     const raw = res.data as unknown;
 
     console.log('RAW /files response:', raw);
@@ -498,12 +662,16 @@ export default class ObsidianSyncPlugin extends Plugin {
       console.log('upload:', normalized, (content || '').length, hash);
 
       const updated_at = Date.now();
-      await axios.post(this.baseUrl + '/upload', {
-        path: normalized,
-        content: content || '',
-        hash,
-        updated_at,
-      });
+      await axios.post(
+        this.baseUrl + '/upload',
+        {
+          path: normalized,
+          content: content || '',
+          hash,
+          updated_at,
+        },
+        { params: this.syncQueryParams() },
+      );
 
       meta[normalized] = {
         hash,
@@ -520,7 +688,7 @@ export default class ObsidianSyncPlugin extends Plugin {
     const normalized = normalizeVaultPath(filePath);
     try {
       const res = await axios.get(this.baseUrl + '/download', {
-        params: { path: normalized },
+        params: { path: normalized, ...this.syncQueryParams() },
         responseType: 'text',
       });
 
@@ -554,7 +722,7 @@ export default class ObsidianSyncPlugin extends Plugin {
   async writeConflictFromRemote(filePath: string): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
     const res = await axios.get(this.baseUrl + '/download', {
-      params: { path: normalized },
+      params: { path: normalized, ...this.syncQueryParams() },
       responseType: 'text',
     });
     const content = res.data || '';
@@ -572,9 +740,13 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   async postDeleteRemote(filePath: string): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
-    await axios.post(this.baseUrl + '/delete', {
-      path: normalized,
-    });
+    await axios.post(
+      this.baseUrl + '/delete',
+      {
+        path: normalized,
+      },
+      { params: this.syncQueryParams() },
+    );
   }
 
   async deleteLocalFile(path: string): Promise<void> {
@@ -587,6 +759,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   async syncNow(options?: { auto?: boolean }) {
     const isAuto = options?.auto === true;
+    await this.ensureSyncIdentity();
 
     if (this.syncRunning) {
       new Notice('同步已在进行中');

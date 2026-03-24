@@ -14881,6 +14881,16 @@ var {
 // main.ts
 var import_blueimp_md5 = __toESM(require_md5());
 var SYNC_META_FILENAME = ".sync_meta.json";
+var SYNC_CONFIG_FILENAME = ".sync_config.json";
+function generateUserId() {
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+    const r = Math.random() * 16 | 0;
+    const v = ch === "x" ? r : r & 3 | 8;
+    return v.toString(16);
+  });
+}
 async function ensureVaultFoldersForPath(vault, filePath) {
   const normalized = filePath.replace(/\\/g, "/");
   const lastSlash = normalized.lastIndexOf("/");
@@ -14905,6 +14915,7 @@ function shouldSync(filePath) {
   if (p.startsWith(".")) return false;
   if (p.includes(".obsidian")) return false;
   if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return false;
+  if (p === SYNC_CONFIG_FILENAME || p.endsWith(`/${SYNC_CONFIG_FILENAME}`)) return false;
   return true;
 }
 var REMOTE_MAP_KEY_DENYLIST = /* @__PURE__ */ new Set([
@@ -15047,6 +15058,17 @@ var DEFAULT_SETTINGS = {
 };
 function formatSyncError(err) {
   if (isAxiosError2(err)) {
+    const data = err.response?.data;
+    if (typeof data === "string" && data.trim()) {
+      const s = data.trim();
+      if (s.length <= 200) return s;
+    }
+    if (isPlainObjectRecord(data)) {
+      const msg = data.message;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+      const errMsg = data.error;
+      if (typeof errMsg === "string" && errMsg.trim()) return errMsg.trim();
+    }
     const parts = [];
     if (err.code) parts.push(err.code);
     if (err.response?.status) parts.push(`HTTP ${err.response.status}`);
@@ -15066,6 +15088,35 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Vault Sync" });
+    const identitySection = containerEl.createDiv();
+    identitySection.createEl("div", {
+      cls: "setting-item-description",
+      text: "\u6B63\u5728\u8BFB\u53D6\u8EAB\u4EFD\u2026"
+    });
+    void this.plugin.ensureSyncIdentity().then(() => {
+      identitySection.empty();
+      identitySection.createEl("div", {
+        cls: "setting-item-description",
+        text: `\u5F53\u524D user_id\uFF1A${this.plugin.userId}`
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("\u751F\u6210\u7ED1\u5B9A\u7801").setDesc("\u5728\u5F53\u524D\u8BBE\u5907\u5411\u670D\u52A1\u7AEF\u7533\u8BF7\u4E00\u6B21\u6027\u7ED1\u5B9A\u7801\uFF0C\u4F9B\u53E6\u4E00\u53F0\u8BBE\u5907\u8F93\u5165\u540E\u5171\u4EAB\u540C\u4E00 user_id\u3002\u7ED1\u5B9A\u7801\u4EC5\u663E\u793A\u3001\u4E0D\u7F13\u5B58\u3002").addButton(
+      (btn) => btn.setButtonText("\u751F\u6210\u7ED1\u5B9A\u7801").onClick(() => {
+        void this.plugin.createBindingCode();
+      })
+    );
+    let bindingInput = null;
+    new import_obsidian.Setting(containerEl).setName("\u7ED1\u5B9A\u5230\u65B0\u8BBE\u5907\uFF08\u8F93\u5165\u7ED1\u5B9A\u7801\uFF09").setDesc("\u5728\u65B0\u8BBE\u5907\u4E0A\u8F93\u5165\u65E7\u8BBE\u5907\u751F\u6210\u7684\u7ED1\u5B9A\u7801\u540E\u786E\u8BA4\uFF0C\u5C06\u7528\u8FD4\u56DE\u7684 user_id \u8986\u76D6\u672C\u5730\u914D\u7F6E\u5E76\u7ACB\u5373\u751F\u6548\uFF08\u4E0D\u505A\u6570\u636E\u8FC1\u79FB\uFF09\u3002").addText((text) => {
+      bindingInput = text.inputEl;
+      text.setPlaceholder("\u7ED1\u5B9A\u7801");
+    }).addButton(
+      (btn) => btn.setButtonText("\u786E\u8BA4\u7ED1\u5B9A").onClick(() => {
+        const code = bindingInput?.value?.trim() ?? "";
+        void this.plugin.consumeBindingCode(code).then((ok) => {
+          if (ok) this.display();
+        });
+      })
+    );
     new import_obsidian.Setting(containerEl).setName("Enable Sync").setDesc(
       "\u5173\u95ED\u65F6\u4E0D\u6267\u884C\u540C\u6B65\uFF08\u542B\u542F\u52A8\u5EF6\u8FDF\u4E0E\u6BCF 60 \u79D2\u81EA\u52A8\u540C\u6B65\uFF09\uFF1B\u5F00\u542F\u540E\u53EF\u4F7F\u7528\u4E0B\u65B9\u300C\u624B\u52A8\u540C\u6B65\u300D\u6216\u547D\u4EE4\u9762\u677F\u4E2D\u7684 Sync now\u3002"
     ).addToggle(
@@ -15095,12 +15146,15 @@ var AUTO_SYNC_START_MIN_MS = 2e3;
 var AUTO_SYNC_START_MAX_MS = 5e3;
 var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   settings = DEFAULT_SETTINGS;
+  /** 由 `.sync_config.json` 加载或生成；仅绑定成功时覆盖 */
+  userId = "";
   syncRunning = false;
   statusBarItem = null;
   statusResultTimer = null;
   autoSyncStartupTimerId = null;
   async onload() {
     await this.loadSettings();
+    await this.ensureSyncIdentity();
     this.initSyncStatusBar();
     this.addSettingTab(new VaultSyncSettingTab(this.app, this));
     this.addCommand({
@@ -15188,6 +15242,87 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   get baseUrl() {
     return this.settings.serverUrl.trim().replace(/\/+$/, "");
   }
+  /** 启动或首次需要时读取/生成 user_id 并写入 `.sync_config.json` */
+  async ensureSyncIdentity() {
+    if (this.userId) return this.userId;
+    try {
+      const raw = await this.app.vault.adapter.read(SYNC_CONFIG_FILENAME);
+      const parsed = JSON.parse(raw || "{}");
+      if (isPlainObjectRecord(parsed) && typeof parsed.user_id === "string" && parsed.user_id.trim() !== "") {
+        this.userId = parsed.user_id.trim();
+        return this.userId;
+      }
+    } catch {
+    }
+    const id = generateUserId();
+    await this.persistSyncIdentity(id);
+    return this.userId;
+  }
+  /** 仅绑定成功时调用：覆盖内存与本地配置 */
+  async persistSyncIdentity(userId) {
+    const next = userId.trim();
+    if (!next) throw new Error("user_id \u65E0\u6548");
+    this.userId = next;
+    await this.app.vault.adapter.write(
+      SYNC_CONFIG_FILENAME,
+      JSON.stringify({ user_id: this.userId }, null, 2)
+    );
+  }
+  syncQueryParams() {
+    if (!this.userId) throw new Error("user_id \u672A\u521D\u59CB\u5316");
+    return { user_id: this.userId };
+  }
+  async createBindingCode() {
+    await this.ensureSyncIdentity();
+    const server = this.baseUrl;
+    if (!server) {
+      new import_obsidian.Notice("\u751F\u6210\u7ED1\u5B9A\u7801\u5931\u8D25\uFF1A\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740", 6e3);
+      return;
+    }
+    try {
+      const res = await axios_default.post(`${server}/binding-code/create`, {
+        user_id: this.userId
+      });
+      const code = res.data?.code;
+      if (typeof code !== "string" || code.trim() === "") {
+        new import_obsidian.Notice("\u751F\u6210\u7ED1\u5B9A\u7801\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548\u7ED1\u5B9A\u7801", 6e3);
+        return;
+      }
+      new import_obsidian.Notice(`\u7ED1\u5B9A\u7801\uFF08\u8BF7\u5728\u65B0\u8BBE\u5907\u8F93\u5165\uFF09\uFF1A${code.trim()}`, 25e3);
+    } catch (e) {
+      new import_obsidian.Notice("\u751F\u6210\u7ED1\u5B9A\u7801\u5931\u8D25\uFF1A" + formatSyncError(e), 8e3);
+    }
+  }
+  /** @returns 是否绑定成功（用于刷新设置页） */
+  async consumeBindingCode(rawCode) {
+    await this.ensureSyncIdentity();
+    const code = rawCode.trim();
+    if (!code) {
+      new import_obsidian.Notice("\u8BF7\u8F93\u5165\u7ED1\u5B9A\u7801");
+      return false;
+    }
+    const server = this.baseUrl;
+    if (!server) {
+      new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740", 6e3);
+      return false;
+    }
+    try {
+      const res = await axios_default.post(`${server}/binding-code/consume`, {
+        code
+      });
+      const uid = res.data?.user_id;
+      if (typeof uid !== "string" || uid.trim() === "") {
+        new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548 user_id", 6e3);
+        return false;
+      }
+      await this.persistSyncIdentity(uid.trim());
+      new import_obsidian.Notice("\u5DF2\u7ED1\u5B9A\uFF1A\u540E\u7EED\u540C\u6B65\u5C06\u4F7F\u7528\u65B0\u7684 user_id", 8e3);
+      return true;
+    } catch (e) {
+      new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A" + formatSyncError(e), 8e3);
+      return false;
+    }
+  }
   async loadMeta() {
     try {
       const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
@@ -15208,7 +15343,10 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   /** GET /files → path→meta 映射（仅 map；解析一次后 normalize，不再覆盖） */
   async fetchRemoteFiles() {
-    const res = await axios_default.get(this.baseUrl + "/files", { responseType: "text" });
+    const res = await axios_default.get(this.baseUrl + "/files", {
+      params: this.syncQueryParams(),
+      responseType: "text"
+    });
     const raw = res.data;
     console.log("RAW /files response:", raw);
     let data = raw;
@@ -15247,12 +15385,16 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       const hash = (0, import_blueimp_md5.default)(content || "");
       console.log("upload:", normalized, (content || "").length, hash);
       const updated_at = Date.now();
-      await axios_default.post(this.baseUrl + "/upload", {
-        path: normalized,
-        content: content || "",
-        hash,
-        updated_at
-      });
+      await axios_default.post(
+        this.baseUrl + "/upload",
+        {
+          path: normalized,
+          content: content || "",
+          hash,
+          updated_at
+        },
+        { params: this.syncQueryParams() }
+      );
       meta[normalized] = {
         hash,
         updated_at,
@@ -15267,7 +15409,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     const normalized = normalizeVaultPath(filePath);
     try {
       const res = await axios_default.get(this.baseUrl + "/download", {
-        params: { path: normalized },
+        params: { path: normalized, ...this.syncQueryParams() },
         responseType: "text"
       });
       const content = res.data || "";
@@ -15295,7 +15437,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   async writeConflictFromRemote(filePath) {
     const normalized = normalizeVaultPath(filePath);
     const res = await axios_default.get(this.baseUrl + "/download", {
-      params: { path: normalized },
+      params: { path: normalized, ...this.syncQueryParams() },
       responseType: "text"
     });
     const content = res.data || "";
@@ -15312,9 +15454,13 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   async postDeleteRemote(filePath) {
     const normalized = normalizeVaultPath(filePath);
-    await axios_default.post(this.baseUrl + "/delete", {
-      path: normalized
-    });
+    await axios_default.post(
+      this.baseUrl + "/delete",
+      {
+        path: normalized
+      },
+      { params: this.syncQueryParams() }
+    );
   }
   async deleteLocalFile(path) {
     const normalized = normalizeVaultPath(path);
@@ -15325,6 +15471,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   async syncNow(options) {
     const isAuto = options?.auto === true;
+    await this.ensureSyncIdentity();
     if (this.syncRunning) {
       new import_obsidian.Notice("\u540C\u6B65\u5DF2\u5728\u8FDB\u884C\u4E2D");
       return;

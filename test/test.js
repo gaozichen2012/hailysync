@@ -21,6 +21,9 @@ const path = require('path');
 const axios = require('axios');
 const { createSyncEngine, fetchRemoteMetaMap } = require('./sync.js');
 
+/** mock / real 共用测试身份；real 模式需服务端按 user_id 隔离数据 */
+const TEST_USER_ID = (process.env.SYNC_TEST_USER_ID || 'aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee').trim();
+
 const VAULT_A = path.join(__dirname, 'vault-A');
 const VAULT_B = path.join(__dirname, 'vault-B');
 
@@ -107,16 +110,20 @@ async function pathExistsInVault(vaultDir, rel) {
   }
 }
 
-async function deleteRemotePath(baseUrl, filePath) {
+async function deleteRemotePath(baseUrl, filePath, userId = TEST_USER_ID) {
   const root = baseUrl.replace(/\/+$/, '');
-  await axios.post(`${root}/delete`, { path: filePath.replace(/\\/g, '/') });
+  await axios.post(
+    `${root}/delete`,
+    { path: filePath.replace(/\\/g, '/') },
+    { params: { user_id: userId } },
+  );
 }
 
 /** 仅删除 baseUrl 上路径以 prefix 开头的远端条目（不碰其它数据） */
-async function remoteCleanupUnderPrefix(baseUrl, prefix) {
+async function remoteCleanupUnderPrefix(baseUrl, prefix, userId = TEST_USER_ID) {
   let map;
   try {
-    map = await fetchRemoteMetaMap(baseUrl);
+    map = await fetchRemoteMetaMap(baseUrl, userId);
   } catch (e) {
     console.warn('  [warn] 拉取 /files 失败，跳过远端前缀清理:', e?.message || e);
     return;
@@ -125,7 +132,7 @@ async function remoteCleanupUnderPrefix(baseUrl, prefix) {
   keys.sort((a, b) => b.length - a.length);
   for (const p of keys) {
     try {
-      await deleteRemotePath(baseUrl, p);
+      await deleteRemotePath(baseUrl, p, userId);
       console.log(`    [cleanup-remote] POST /delete ${p}`);
     } catch (e) {
       console.warn(`    [warn] 删除远端 ${p} 失败:`, e?.message || e);
@@ -134,12 +141,30 @@ async function remoteCleanupUnderPrefix(baseUrl, prefix) {
 }
 
 function createMockSyncServer() {
-  /** @type {Map<string, { content: string, hash: string, updated_at: number, deleted?: boolean }>} */
-  const files = new Map();
+  /** @type {Map<string, Map<string, { content: string, hash: string, updated_at: number, deleted?: boolean }>>} */
+  const userStores = new Map();
+  /** @type {Map<string, { userId: string, expiresAt: number }>} */
+  const bindingCodes = new Map();
   let uploadCount = 0;
   let downloadCount = 0;
 
-  function buildFilesPayload() {
+  function storeForUser(userId) {
+    let m = userStores.get(userId);
+    if (!m) {
+      m = new Map();
+      userStores.set(userId, m);
+    }
+    return m;
+  }
+
+  function requireUserId(url) {
+    const uid = (url.searchParams.get('user_id') || '').trim();
+    if (!uid) return null;
+    return uid;
+  }
+
+  function buildFilesPayload(userId) {
+    const files = storeForUser(userId);
     const out = {};
     for (const [p, rec] of files.entries()) {
       if (!rec.deleted) {
@@ -161,27 +186,50 @@ function createMockSyncServer() {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     try {
       if (req.method === 'GET' && url.pathname === '/files') {
+        const userId = requireUserId(url);
+        if (!userId) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          return;
+        }
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.end(JSON.stringify(buildFilesPayload()));
+        res.end(JSON.stringify(buildFilesPayload(userId)));
         return;
       }
 
       if (req.method === 'POST' && url.pathname === '/upload') {
+        const userId = requireUserId(url);
+        if (!userId) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          return;
+        }
         uploadCount++;
+        const files = storeForUser(userId);
         const body = JSON.parse(await readBody(req));
         const p = body.path.replace(/\\/g, '/');
         const content = body.content ?? '';
         const hash = body.hash;
         const updated_at = body.updated_at ?? Date.now();
         files.set(p, { content, hash, updated_at, deleted: false });
-        console.log(`    [server] POST /upload ${p}`);
+        console.log(`    [server] POST /upload uid=${userId.slice(0, 8)}… ${p}`);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ ok: true }));
         return;
       }
 
       if (req.method === 'GET' && url.pathname === '/download') {
+        const userId = requireUserId(url);
+        if (!userId) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          return;
+        }
         downloadCount++;
+        const files = storeForUser(userId);
         const p = (url.searchParams.get('path') || '').replace(/\\/g, '/');
         const rec = files.get(p);
         if (!rec || rec.deleted) {
@@ -196,6 +244,14 @@ function createMockSyncServer() {
       }
 
       if (req.method === 'POST' && url.pathname === '/delete') {
+        const userId = requireUserId(url);
+        if (!userId) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          return;
+        }
+        const files = storeForUser(userId);
         const body = JSON.parse(await readBody(req));
         const p = body.path.replace(/\\/g, '/');
         const rec = files.get(p);
@@ -205,6 +261,45 @@ function createMockSyncServer() {
         console.log(`    [server] POST /delete ${p}`);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/binding-code/create') {
+        const body = JSON.parse(await readBody(req));
+        const uid = typeof body.user_id === 'string' ? body.user_id.trim() : '';
+        if (!uid) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          return;
+        }
+        const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+        bindingCodes.set(code, { userId: uid, expiresAt: Date.now() + 10 * 60 * 1000 });
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.end(JSON.stringify({ code }));
+        return;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/binding-code/consume') {
+        const body = JSON.parse(await readBody(req));
+        const code = typeof body.code === 'string' ? body.code.trim().toUpperCase() : '';
+        const entry = bindingCodes.get(code);
+        if (!entry) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ message: '绑定码无效' }));
+          return;
+        }
+        if (Date.now() > entry.expiresAt) {
+          bindingCodes.delete(code);
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ message: '绑定码已过期' }));
+          return;
+        }
+        bindingCodes.delete(code);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.end(JSON.stringify({ user_id: entry.userId }));
         return;
       }
 
@@ -219,7 +314,10 @@ function createMockSyncServer() {
 
   return {
     server,
-    files,
+    /** 兼容旧测试：返回默认测试用户的文件 Map */
+    get files() {
+      return storeForUser(TEST_USER_ID);
+    },
     get uploadCount() {
       return uploadCount;
     },
@@ -231,7 +329,8 @@ function createMockSyncServer() {
       downloadCount = 0;
     },
     clearStore() {
-      files.clear();
+      userStores.clear();
+      bindingCodes.clear();
       uploadCount = 0;
       downloadCount = 0;
     },
@@ -271,6 +370,7 @@ async function main() {
   console.log(`当前模式: ${MODE}`);
   console.log(`当前 baseUrl: ${baseUrl}`);
   if (isReal) {
+    console.log(`SYNC_TEST_USER_ID=${TEST_USER_ID}（服务端须按 user_id 隔离；与插件 query 一致）`);
     console.log(`远端隔离前缀: ${REMOTE_PREFIX_SLASH}（写入/删除仅针对此前缀；不会全站清空）`);
     console.log(
       '说明：与插件行为一致，sync 会处理远端 /files 中的全部路径，其它用户的笔记可能被下载到 test/vault-A、vault-B（仅本地测试目录）。',
@@ -288,11 +388,13 @@ async function main() {
   const syncA = createSyncEngine({
     vaultRoot: VAULT_A,
     baseUrl,
+    userId: TEST_USER_ID,
     log: (m) => console.log(`  [A] ${m}`),
   }).sync;
   const syncB = createSyncEngine({
     vaultRoot: VAULT_B,
     baseUrl,
+    userId: TEST_USER_ID,
     log: (m) => console.log(`  [B] ${m}`),
   }).sync;
 

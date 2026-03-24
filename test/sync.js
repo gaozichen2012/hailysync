@@ -9,6 +9,7 @@ const axios = require('axios');
 const md5 = require('blueimp-md5');
 
 const SYNC_META_FILENAME = '.sync_meta.json';
+const SYNC_CONFIG_FILENAME = '.sync_config.json';
 
 function normalizeVaultPath(p) {
   return p.replace(/\\/g, '/');
@@ -20,6 +21,7 @@ function shouldSync(filePath) {
   if (p.startsWith('.')) return false;
   if (p.includes('.obsidian')) return false;
   if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return false;
+  if (p === SYNC_CONFIG_FILENAME || p.endsWith(`/${SYNC_CONFIG_FILENAME}`)) return false;
   return true;
 }
 
@@ -120,8 +122,34 @@ async function listMarkdownFiles(vaultRoot) {
   return out;
 }
 
-function createSyncEngine({ vaultRoot, baseUrl, log = console.log }) {
+async function loadOrCreateUserId(vaultRoot) {
+  const fp = path.join(vaultRoot, SYNC_CONFIG_FILENAME);
+  try {
+    const raw = await fs.readFile(fp, 'utf8');
+    const o = JSON.parse(raw || '{}');
+    if (o && typeof o.user_id === 'string' && o.user_id.trim()) return o.user_id.trim();
+  } catch {
+    /* empty */
+  }
+  const { randomUUID } = await import('crypto');
+  const user_id = randomUUID();
+  await fs.mkdir(vaultRoot, { recursive: true });
+  await fs.writeFile(fp, JSON.stringify({ user_id }, null, 2), 'utf8');
+  return user_id;
+}
+
+/**
+ * @param {{ vaultRoot: string, baseUrl: string, log?: (m: string) => void, userId?: string }} opts
+ */
+function createSyncEngine({ vaultRoot, baseUrl, log = console.log, userId: forcedUserId }) {
   const root = path.resolve(vaultRoot);
+  let cachedUserId = typeof forcedUserId === 'string' && forcedUserId.trim() ? forcedUserId.trim() : null;
+
+  async function getUserId() {
+    if (cachedUserId) return cachedUserId;
+    cachedUserId = await loadOrCreateUserId(root);
+    return cachedUserId;
+  }
 
   async function loadMeta() {
     const fp = path.join(root, SYNC_META_FILENAME);
@@ -168,7 +196,11 @@ function createSyncEngine({ vaultRoot, baseUrl, log = console.log }) {
   }
 
   async function fetchRemoteFiles() {
-    const res = await axios.get(`${baseUrl.replace(/\/+$/, '')}/files`, { responseType: 'text' });
+    const uid = await getUserId();
+    const res = await axios.get(`${baseUrl.replace(/\/+$/, '')}/files`, {
+      params: { user_id: uid },
+      responseType: 'text',
+    });
     let data = res.data;
     if (typeof data === 'string') {
       const s = data.trim();
@@ -184,19 +216,25 @@ function createSyncEngine({ vaultRoot, baseUrl, log = console.log }) {
     const hash = md5(content || '');
     log(`  [upload] ${normalized} len=${(content || '').length} hash=${hash}`);
     const updated_at = Date.now();
-    await axios.post(`${baseUrl.replace(/\/+$/, '')}/upload`, {
-      path: normalized,
-      content: content || '',
-      hash,
-      updated_at,
-    });
+    const uid = await getUserId();
+    await axios.post(
+      `${baseUrl.replace(/\/+$/, '')}/upload`,
+      {
+        path: normalized,
+        content: content || '',
+        hash,
+        updated_at,
+      },
+      { params: { user_id: uid } },
+    );
     meta[normalized] = { hash, updated_at, deleted: false };
   }
 
   async function downloadFile(filePath, meta) {
     const normalized = normalizeVaultPath(filePath);
+    const uid = await getUserId();
     const res = await axios.get(`${baseUrl.replace(/\/+$/, '')}/download`, {
-      params: { path: normalized },
+      params: { path: normalized, user_id: uid },
       responseType: 'text',
     });
     const content = res.data || '';
@@ -209,8 +247,9 @@ function createSyncEngine({ vaultRoot, baseUrl, log = console.log }) {
 
   async function writeConflictFromRemote(filePath) {
     const normalized = normalizeVaultPath(filePath);
+    const uid = await getUserId();
     const res = await axios.get(`${baseUrl.replace(/\/+$/, '')}/download`, {
-      params: { path: normalized },
+      params: { path: normalized, user_id: uid },
       responseType: 'text',
     });
     const content = res.data || '';
@@ -222,7 +261,8 @@ function createSyncEngine({ vaultRoot, baseUrl, log = console.log }) {
 
   async function postDeleteRemote(filePath) {
     const normalized = normalizeVaultPath(filePath);
-    await axios.post(`${baseUrl.replace(/\/+$/, '')}/delete`, { path: normalized });
+    const uid = await getUserId();
+    await axios.post(`${baseUrl.replace(/\/+$/, '')}/delete`, { path: normalized }, { params: { user_id: uid } });
   }
 
   /**
@@ -355,9 +395,11 @@ function createSyncEngine({ vaultRoot, baseUrl, log = console.log }) {
 }
 
 /** 拉取远端 path→meta（与引擎内解析一致），供测试清理等使用 */
-async function fetchRemoteMetaMap(baseUrl) {
+async function fetchRemoteMetaMap(baseUrl, userId) {
   const root = baseUrl.replace(/\/+$/, '');
-  const res = await axios.get(`${root}/files`, { responseType: 'text' });
+  const uid = typeof userId === 'string' && userId.trim() ? userId.trim() : '';
+  if (!uid) throw new Error('fetchRemoteMetaMap 需要 userId');
+  const res = await axios.get(`${root}/files`, { params: { user_id: uid }, responseType: 'text' });
   let data = res.data;
   if (typeof data === 'string') {
     const s = data.trim();
@@ -367,4 +409,10 @@ async function fetchRemoteMetaMap(baseUrl) {
   return normalizeRemoteMap(data);
 }
 
-module.exports = { createSyncEngine, SYNC_META_FILENAME, fetchRemoteMetaMap };
+module.exports = {
+  createSyncEngine,
+  SYNC_META_FILENAME,
+  SYNC_CONFIG_FILENAME,
+  fetchRemoteMetaMap,
+  loadOrCreateUserId,
+};
