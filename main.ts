@@ -580,9 +580,11 @@ export default class ObsidianSyncPlugin extends Plugin {
       return false;
     }
     try {
-      const res = await axios.post<{ user_id?: string }>(`${server}/binding-code/consume`, {
-        code,
-      });
+      const res = await axios.post<{ user_id?: string }>(
+        `${server}/binding-code/consume`,
+        { code },
+        { params: this.syncQueryParams() },
+      );
       const uid = res.data?.user_id;
       if (typeof uid !== 'string' || uid.trim() === '') {
         new Notice('绑定失败：服务端未返回有效 user_id', 6000);

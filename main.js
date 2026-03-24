@@ -15319,9 +15319,11 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       return false;
     }
     try {
-      const res = await axios_default.post(`${server}/binding-code/consume`, {
-        code
-      });
+      const res = await axios_default.post(
+        `${server}/binding-code/consume`,
+        { code },
+        { params: this.syncQueryParams() }
+      );
       const uid = res.data?.user_id;
       if (typeof uid !== "string" || uid.trim() === "") {
         new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548 user_id", 6e3);

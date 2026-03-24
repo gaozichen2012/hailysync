@@ -7,6 +7,9 @@
  *   MODE=real node test/test.js
  *   node test/test.js --real    （Windows 等未设置 MODE 时可用）
  *
+ * mock 模式下会先跑「最小身份层协议自检」（错误体仅 { message }、user_id 隔离、binding 等），
+ * 再跑双 vault 同步回归；可与线上 sync-server 对照的契约见 createMockSyncServer 实现。
+ *
  * 环境变量：
  *   MODE                 mock（默认）| real
  *   SYNC_TEST_BASE_URL   real 模式下的服务根 URL，默认 http://120.77.77.185:3000
@@ -18,6 +21,7 @@
 const http = require('http');
 const fs = require('fs/promises');
 const path = require('path');
+const { randomInt } = require('crypto');
 const axios = require('axios');
 const { createSyncEngine, fetchRemoteMetaMap } = require('./sync.js');
 
@@ -140,7 +144,13 @@ async function remoteCleanupUnderPrefix(baseUrl, prefix, userId = TEST_USER_ID) 
   }
 }
 
-function createMockSyncServer() {
+/** @param {{ bindingCodeTtlMs?: number }} [options] */
+function createMockSyncServer(options = {}) {
+  const bindingCodeTtlMs =
+    typeof options.bindingCodeTtlMs === 'number' && options.bindingCodeTtlMs >= 0
+      ? options.bindingCodeTtlMs
+      : 10 * 60 * 1000;
+
   /** @type {Map<string, Map<string, { content: string, hash: string, updated_at: number, deleted?: boolean }>>} */
   const userStores = new Map();
   /** @type {Map<string, { userId: string, expiresAt: number }>} */
@@ -161,6 +171,28 @@ function createMockSyncServer() {
     const uid = (url.searchParams.get('user_id') || '').trim();
     if (!uid) return null;
     return uid;
+  }
+
+  function sendJson(res, status, body) {
+    res.statusCode = status;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify(body));
+  }
+
+  function generateBindingCode() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const len = 6 + randomInt(3);
+    let s = '';
+    for (let i = 0; i < len; i++) s += alphabet[randomInt(alphabet.length)];
+    return s;
+  }
+
+  function resolveCreateUserId(url, body) {
+    const q = (url.searchParams.get('user_id') || '').trim();
+    if (q) return q;
+    const b = body.user_id;
+    if (typeof b === 'string' && b.trim() !== '') return b.trim();
+    return '';
   }
 
   function buildFilesPayload(userId) {
@@ -188,56 +220,66 @@ function createMockSyncServer() {
       if (req.method === 'GET' && url.pathname === '/files') {
         const userId = requireUserId(url);
         if (!userId) {
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          sendJson(res, 400, { message: 'missing user_id' });
           return;
         }
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.end(JSON.stringify(buildFilesPayload(userId)));
+        sendJson(res, 200, buildFilesPayload(userId));
         return;
       }
 
       if (req.method === 'POST' && url.pathname === '/upload') {
         const userId = requireUserId(url);
         if (!userId) {
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          sendJson(res, 400, { message: 'missing user_id' });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse(await readBody(req));
+        } catch {
+          sendJson(res, 400, { message: 'invalid json' });
+          return;
+        }
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { message: 'invalid json' });
+          return;
+        }
+        if (typeof body.path !== 'string' || !body.path.trim()) {
+          sendJson(res, 400, { message: 'invalid path' });
           return;
         }
         uploadCount++;
         const files = storeForUser(userId);
-        const body = JSON.parse(await readBody(req));
         const p = body.path.replace(/\\/g, '/');
         const content = body.content ?? '';
         const hash = body.hash;
         const updated_at = body.updated_at ?? Date.now();
         files.set(p, { content, hash, updated_at, deleted: false });
         console.log(`    [server] POST /upload uid=${userId.slice(0, 8)}… ${p}`);
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ ok: true }));
+        sendJson(res, 200, { ok: true });
         return;
       }
 
       if (req.method === 'GET' && url.pathname === '/download') {
         const userId = requireUserId(url);
         if (!userId) {
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          sendJson(res, 400, { message: 'missing user_id' });
+          return;
+        }
+        const p = (url.searchParams.get('path') || '').replace(/\\/g, '/').trim();
+        if (!p) {
+          sendJson(res, 400, { message: 'invalid path' });
           return;
         }
         downloadCount++;
         const files = storeForUser(userId);
-        const p = (url.searchParams.get('path') || '').replace(/\\/g, '/');
         const rec = files.get(p);
         if (!rec || rec.deleted) {
-          res.statusCode = 404;
-          res.end('not found');
+          sendJson(res, 404, { message: 'file not found' });
           return;
         }
         console.log(`    [server] GET /download ${p}`);
+        res.statusCode = 200;
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.end(rec.content);
         return;
@@ -246,73 +288,107 @@ function createMockSyncServer() {
       if (req.method === 'POST' && url.pathname === '/delete') {
         const userId = requireUserId(url);
         if (!userId) {
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.end(JSON.stringify({ message: '缺少 user_id' }));
+          sendJson(res, 400, { message: 'missing user_id' });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse(await readBody(req));
+        } catch {
+          sendJson(res, 400, { message: 'invalid json' });
+          return;
+        }
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { message: 'invalid json' });
+          return;
+        }
+        if (typeof body.path !== 'string' || !body.path.trim()) {
+          sendJson(res, 400, { message: 'invalid path' });
           return;
         }
         const files = storeForUser(userId);
-        const body = JSON.parse(await readBody(req));
         const p = body.path.replace(/\\/g, '/');
         const rec = files.get(p);
         if (rec) {
           rec.deleted = true;
         }
         console.log(`    [server] POST /delete ${p}`);
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ ok: true }));
+        sendJson(res, 200, { ok: true });
         return;
       }
 
       if (req.method === 'POST' && url.pathname === '/binding-code/create') {
+        let body = {};
         const raw = await readBody(req);
-        const body = raw.trim() ? JSON.parse(raw) : {};
-        const uidFromQuery = (url.searchParams.get('user_id') || '').trim();
-        const uidFromBody =
-          typeof body.user_id === 'string' ? body.user_id.trim() : '';
-        const uid = uidFromQuery || uidFromBody;
-        if (!uid) {
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.end(JSON.stringify({ message: '缺少 user_id' }));
+        if (raw.trim()) {
+          try {
+            body = JSON.parse(raw);
+          } catch {
+            sendJson(res, 400, { message: 'invalid json' });
+            return;
+          }
+        }
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { message: 'invalid json' });
           return;
         }
-        const code = Math.random().toString(36).slice(2, 8).toUpperCase();
-        bindingCodes.set(code, { userId: uid, expiresAt: Date.now() + 10 * 60 * 1000 });
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.end(JSON.stringify({ code }));
+        const uid = resolveCreateUserId(url, body);
+        if (!uid) {
+          sendJson(res, 400, { message: 'missing user_id' });
+          return;
+        }
+        const code = generateBindingCode();
+        bindingCodes.set(code.toUpperCase(), {
+          userId: uid,
+          expiresAt: Date.now() + bindingCodeTtlMs,
+        });
+        sendJson(res, 200, { code });
         return;
       }
 
       if (req.method === 'POST' && url.pathname === '/binding-code/consume') {
-        const body = JSON.parse(await readBody(req));
-        const code = typeof body.code === 'string' ? body.code.trim().toUpperCase() : '';
+        const userId = requireUserId(url);
+        if (!userId) {
+          sendJson(res, 400, { message: 'missing user_id' });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse(await readBody(req));
+        } catch {
+          sendJson(res, 400, { message: 'invalid json' });
+          return;
+        }
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { message: 'invalid json' });
+          return;
+        }
+        const rawCode = typeof body.code === 'string' ? body.code.trim() : '';
+        if (!rawCode) {
+          sendJson(res, 400, { message: 'invalid code' });
+          return;
+        }
+        const code = rawCode.toUpperCase();
         const entry = bindingCodes.get(code);
         if (!entry) {
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.end(JSON.stringify({ message: '绑定码无效' }));
+          sendJson(res, 400, { message: 'invalid code' });
           return;
         }
         if (Date.now() > entry.expiresAt) {
           bindingCodes.delete(code);
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.end(JSON.stringify({ message: '绑定码已过期' }));
+          sendJson(res, 400, { message: 'expired code' });
           return;
         }
         bindingCodes.delete(code);
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.end(JSON.stringify({ user_id: entry.userId }));
+        sendJson(res, 200, { user_id: entry.userId });
         return;
       }
 
-      res.statusCode = 404;
-      res.end('not found');
+      sendJson(res, 404, { message: 'not found' });
     } catch (e) {
       console.error('mock server error', e);
-      res.statusCode = 500;
-      res.end(String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      sendJson(res, 500, { message: msg });
     }
   });
 
@@ -351,6 +427,157 @@ function listen(server) {
   });
 }
 
+/** axios：不抛状态码，便于断言 JSON 错误体 */
+function axNoThrow(cfg) {
+  return axios({ validateStatus: () => true, ...cfg });
+}
+
+/**
+ * 最小身份层协议自检（仅 mock；与仓库内 createMockSyncServer 行为一致）。
+ * 真实 sync-server 不在本仓库，部署时请对照此契约。
+ */
+async function runProtocolIdentityChecks() {
+  logStep('0️⃣ 最小身份层协议自检（mock）');
+  const m = createMockSyncServer();
+  const port = await listen(m.server);
+  const base = `http://127.0.0.1:${port}`;
+  const ua = 'svc-selfcheck-user-a';
+  const ub = 'svc-selfcheck-user-b';
+
+  const assertNoErrorKey = (data, label) => {
+    if (data && typeof data === 'object' && !Array.isArray(data) && 'error' in data) {
+      fail(`${label}：错误响应不得包含 error 字段`);
+    }
+  };
+
+  try {
+    let r = await axNoThrow({ method: 'GET', url: `${base}/files` });
+    ok(r.status === 400 && r.data?.message === 'missing user_id', '/files 无 user_id');
+    assertNoErrorKey(r.data, '/files');
+
+    r = await axNoThrow({ method: 'GET', url: `${base}/files`, params: { user_id: '  ' } });
+    ok(r.status === 400 && r.data?.message === 'missing user_id', '/files 空白 user_id');
+
+    r = await axNoThrow({
+      method: 'POST',
+      url: `${base}/upload`,
+      data: { path: 'x.md', content: '' },
+    });
+    ok(r.status === 400 && r.data?.message === 'missing user_id', '/upload 无 user_id');
+
+    r = await axNoThrow({
+      method: 'POST',
+      url: `${base}/upload`,
+      data: 'not-json',
+      headers: { 'Content-Type': 'application/json' },
+      params: { user_id: ua },
+    });
+    ok(r.status === 400 && r.data?.message === 'invalid json', '/upload 非法 JSON');
+
+    r = await axNoThrow({
+      method: 'POST',
+      url: `${base}/upload`,
+      data: { path: '', content: '' },
+      params: { user_id: ua },
+    });
+    ok(r.status === 400 && r.data?.message === 'invalid path', '/upload 空 path');
+
+    r = await axNoThrow({ method: 'GET', url: `${base}/download`, params: { user_id: ua } });
+    ok(r.status === 400 && r.data?.message === 'invalid path', '/download 无 path');
+
+    r = await axNoThrow({ method: 'GET', url: `${base}/download`, params: { user_id: ua, path: 'missing.md' } });
+    ok(r.status === 404 && r.data?.message === 'file not found', '/download 文件不存在');
+    assertNoErrorKey(r.data, '/download 404');
+
+    await axNoThrow({
+      method: 'POST',
+      url: `${base}/upload`,
+      data: { path: 'isolation/p.md', content: 'x', hash: 'h', updated_at: 1 },
+      params: { user_id: ua },
+    });
+    r = await axNoThrow({ method: 'GET', url: `${base}/files`, params: { user_id: ub } });
+    ok(r.status === 200 && !Object.prototype.hasOwnProperty.call(r.data || {}, 'isolation/p.md'), 'user_id 数据隔离');
+
+    r = await axNoThrow({ method: 'POST', url: `${base}/binding-code/create`, data: {} });
+    ok(r.status === 400 && r.data?.message === 'missing user_id', 'binding create 无 user_id');
+
+    r = await axNoThrow({ method: 'POST', url: `${base}/binding-code/consume`, data: { code: 'ABC' } });
+    ok(r.status === 400 && r.data?.message === 'missing user_id', 'binding consume 无 user_id');
+
+    r = await axNoThrow({
+      method: 'POST',
+      url: `${base}/binding-code/consume`,
+      data: { code: 'ZZZZZZ' },
+      params: { user_id: ub },
+    });
+    ok(r.status === 400 && r.data?.message === 'invalid code', 'binding consume 不存在 code');
+
+    r = await axNoThrow({ method: 'POST', url: `${base}/binding-code/create`, data: { user_id: ua } });
+    ok(r.status === 200, 'binding create 成功');
+    const kCreate = r.data && typeof r.data === 'object' ? Object.keys(r.data).sort().join(',') : '';
+    ok(kCreate === 'code', `create 仅返回 code（实际键: ${kCreate}）`);
+    const codeRaw = r.data.code;
+    ok(typeof codeRaw === 'string' && codeRaw.length >= 6 && codeRaw.length <= 8, 'code 为字符串且长度 6–8');
+
+    const lower = codeRaw.toLowerCase();
+    r = await axNoThrow({
+      method: 'POST',
+      url: `${base}/binding-code/consume`,
+      data: { code: lower },
+      params: { user_id: ub },
+    });
+    ok(r.status === 200 && r.data?.user_id === ua, 'consume 大小写不敏感');
+    const kConsume = r.data && typeof r.data === 'object' ? Object.keys(r.data).sort().join(',') : '';
+    ok(kConsume === 'user_id', `consume 仅返回 user_id（实际键: ${kConsume}）`);
+
+    const mExp = createMockSyncServer({ bindingCodeTtlMs: 50 });
+    const pExp = await listen(mExp.server);
+    const bExp = `http://127.0.0.1:${pExp}`;
+    try {
+      const ce = (await axios.post(`${bExp}/binding-code/create`, { user_id: ua })).data.code;
+      await new Promise((res) => setTimeout(res, 80));
+      r = await axNoThrow({
+        method: 'POST',
+        url: `${bExp}/binding-code/consume`,
+        data: { code: ce },
+        params: { user_id: ub },
+      });
+      ok(r.status === 400 && r.data?.message === 'expired code', '过期 → expired code');
+    } finally {
+      mExp.server.close();
+    }
+
+    const mOnce = createMockSyncServer({ bindingCodeTtlMs: 600_000 });
+    const pOnce = await listen(mOnce.server);
+    const bOnce = `http://127.0.0.1:${pOnce}`;
+    try {
+      const c1 = (await axios.post(`${bOnce}/binding-code/create`, { user_id: ua })).data.code;
+      r = await axNoThrow({
+        method: 'POST',
+        url: `${bOnce}/binding-code/consume`,
+        data: { code: c1 },
+        params: { user_id: ub },
+      });
+      ok(r.status === 200, '首次 consume 成功');
+      r = await axNoThrow({
+        method: 'POST',
+        url: `${bOnce}/binding-code/consume`,
+        data: { code: c1 },
+        params: { user_id: ub },
+      });
+      ok(r.status === 400 && r.data?.message === 'invalid code', '重复 consume → invalid code');
+    } finally {
+      mOnce.server.close();
+    }
+
+    r = await axNoThrow({ method: 'GET', url: `${base}/nope` });
+    ok(r.status === 404 && r.data?.message === 'not found', '未知路径 JSON 404');
+  } finally {
+    m.server.close();
+  }
+  console.log('  ✓ 协议自检通过（错误体均为 { message }；binding 与 user 隔离已 spot-check）');
+}
+
 async function main() {
   if (!isMock && !isReal) {
     console.error(`无效 MODE="${MODE}"，请使用 mock、real，或传参 --mock / --real`);
@@ -363,6 +590,7 @@ async function main() {
   let baseUrl = '';
 
   if (isMock) {
+    await runProtocolIdentityChecks();
     mock = createMockSyncServer();
     const port = await listen(mock.server);
     baseUrl = `http://127.0.0.1:${port}`;
