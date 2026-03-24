@@ -264,6 +264,17 @@ function formatSyncError(err: unknown): string {
     const data = err.response?.data;
     if (typeof data === 'string' && data.trim()) {
       const s = data.trim();
+      try {
+        const parsed = JSON.parse(s) as unknown;
+        if (isPlainObjectRecord(parsed)) {
+          const msg = parsed.message;
+          if (typeof msg === 'string' && msg.trim()) return msg.trim();
+          const errMsg = parsed.error;
+          if (typeof errMsg === 'string' && errMsg.trim()) return errMsg.trim();
+        }
+      } catch {
+        /* 非 JSON 字符串 */
+      }
       if (s.length <= 200) return s;
     }
     if (isPlainObjectRecord(data as unknown)) {
@@ -539,9 +550,11 @@ export default class ObsidianSyncPlugin extends Plugin {
       return;
     }
     try {
-      const res = await axios.post<{ code?: string }>(`${server}/binding-code/create`, {
-        user_id: this.userId,
-      });
+      const res = await axios.post<{ code?: string }>(
+        `${server}/binding-code/create`,
+        { user_id: this.userId },
+        { params: this.syncQueryParams() },
+      );
       const code = res.data?.code;
       if (typeof code !== 'string' || code.trim() === '') {
         new Notice('生成绑定码失败：服务端未返回有效绑定码', 6000);

@@ -265,8 +265,12 @@ function createMockSyncServer() {
       }
 
       if (req.method === 'POST' && url.pathname === '/binding-code/create') {
-        const body = JSON.parse(await readBody(req));
-        const uid = typeof body.user_id === 'string' ? body.user_id.trim() : '';
+        const raw = await readBody(req);
+        const body = raw.trim() ? JSON.parse(raw) : {};
+        const uidFromQuery = (url.searchParams.get('user_id') || '').trim();
+        const uidFromBody =
+          typeof body.user_id === 'string' ? body.user_id.trim() : '';
+        const uid = uidFromQuery || uidFromBody;
         if (!uid) {
           res.statusCode = 400;
           res.setHeader('Content-Type', 'application/json; charset=utf-8');

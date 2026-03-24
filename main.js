@@ -15061,6 +15061,16 @@ function formatSyncError(err) {
     const data = err.response?.data;
     if (typeof data === "string" && data.trim()) {
       const s = data.trim();
+      try {
+        const parsed = JSON.parse(s);
+        if (isPlainObjectRecord(parsed)) {
+          const msg = parsed.message;
+          if (typeof msg === "string" && msg.trim()) return msg.trim();
+          const errMsg = parsed.error;
+          if (typeof errMsg === "string" && errMsg.trim()) return errMsg.trim();
+        }
+      } catch {
+      }
       if (s.length <= 200) return s;
     }
     if (isPlainObjectRecord(data)) {
@@ -15280,9 +15290,11 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       return;
     }
     try {
-      const res = await axios_default.post(`${server}/binding-code/create`, {
-        user_id: this.userId
-      });
+      const res = await axios_default.post(
+        `${server}/binding-code/create`,
+        { user_id: this.userId },
+        { params: this.syncQueryParams() }
+      );
       const code = res.data?.code;
       if (typeof code !== "string" || code.trim() === "") {
         new import_obsidian.Notice("\u751F\u6210\u7ED1\u5B9A\u7801\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548\u7ED1\u5B9A\u7801", 6e3);
