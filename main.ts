@@ -290,7 +290,7 @@ function maskBindingCode(code: string): string {
 function extractBindingCodeFromJson(data: unknown): string | null {
   if (typeof data === 'string' && data.trim()) return data.trim();
   if (!isPlainObjectRecord(data)) return null;
-  const c = data.binding_code ?? data.bindingCode ?? data.code;
+  const c = data.binding_code;
   if (typeof c === 'string' && c.trim()) return c.trim();
   return null;
 }
@@ -298,18 +298,17 @@ function extractBindingCodeFromJson(data: unknown): string | null {
 function parseDevicesListPayload(data: unknown): ApiDeviceRow[] {
   const rows: ApiDeviceRow[] = [];
   let arr: unknown[] = [];
-  if (Array.isArray(data)) arr = data;
-  else if (isPlainObjectRecord(data)) {
-    const list = data.devices ?? data.data ?? data.list;
+  if (isPlainObjectRecord(data)) {
+    const list = data.devices;
     if (Array.isArray(list)) arr = list;
   }
   for (const item of arr) {
     if (!isPlainObjectRecord(item)) continue;
-    const id = item.device_id ?? item.id;
+    const id = item.device_id;
     if (typeof id !== 'string' || !id.trim()) continue;
-    const name = item.device_name ?? item.name ?? '';
-    const typ = item.device_type ?? item.type ?? '';
-    const la = item.last_active_at ?? item.lastActiveAt ?? item.updated_at ?? item.updatedAt;
+    const name = item.device_name ?? '';
+    const typ = item.device_type ?? '';
+    const la = item.last_active_at;
     let lastAt: number | null = null;
     if (typeof la === 'number' && Number.isFinite(la)) lastAt = la;
     else if (typeof la === 'string' && la.trim() !== '') {
@@ -1229,11 +1228,6 @@ export default class ObsidianSyncPlugin extends Plugin {
     }
   }
 
-  private syncQueryParams(): { user_id: string } {
-    if (!this.userId) throw new Error('user_id 未初始化');
-    return { user_id: this.userId };
-  }
-
   async loadMeta(): Promise<SyncMetaMap> {
     try {
       const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
@@ -1262,7 +1256,6 @@ export default class ObsidianSyncPlugin extends Plugin {
   /** GET /files → path→meta 映射（仅 map；解析一次后 normalize，不再覆盖） */
   async fetchRemoteFiles(): Promise<SyncMetaMap> {
     const res = await axios.get(this.baseUrl + '/files', {
-      params: this.syncQueryParams(),
       headers: this.deviceHeaders(),
       responseType: 'text',
     });
@@ -1321,7 +1314,7 @@ export default class ObsidianSyncPlugin extends Plugin {
           hash,
           updated_at,
         },
-        { params: this.syncQueryParams(), headers: this.deviceHeaders() },
+        { headers: this.deviceHeaders() },
       );
 
       meta[normalized] = {
@@ -1339,7 +1332,7 @@ export default class ObsidianSyncPlugin extends Plugin {
     const normalized = normalizeVaultPath(filePath);
     try {
       const res = await axios.get(this.baseUrl + '/download', {
-        params: { path: normalized, ...this.syncQueryParams() },
+        params: { path: normalized },
         headers: this.deviceHeaders(),
         responseType: 'text',
       });
@@ -1374,7 +1367,7 @@ export default class ObsidianSyncPlugin extends Plugin {
   async writeConflictFromRemote(filePath: string): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
     const res = await axios.get(this.baseUrl + '/download', {
-      params: { path: normalized, ...this.syncQueryParams() },
+      params: { path: normalized },
       headers: this.deviceHeaders(),
       responseType: 'text',
     });
@@ -1398,7 +1391,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       {
         path: normalized,
       },
-      { params: this.syncQueryParams(), headers: this.deviceHeaders() },
+      { headers: this.deviceHeaders() },
     );
   }
 

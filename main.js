@@ -15074,25 +15074,24 @@ function maskBindingCode(code) {
 function extractBindingCodeFromJson(data) {
   if (typeof data === "string" && data.trim()) return data.trim();
   if (!isPlainObjectRecord(data)) return null;
-  const c = data.binding_code ?? data.bindingCode ?? data.code;
+  const c = data.binding_code;
   if (typeof c === "string" && c.trim()) return c.trim();
   return null;
 }
 function parseDevicesListPayload(data) {
   const rows = [];
   let arr = [];
-  if (Array.isArray(data)) arr = data;
-  else if (isPlainObjectRecord(data)) {
-    const list = data.devices ?? data.data ?? data.list;
+  if (isPlainObjectRecord(data)) {
+    const list = data.devices;
     if (Array.isArray(list)) arr = list;
   }
   for (const item of arr) {
     if (!isPlainObjectRecord(item)) continue;
-    const id = item.device_id ?? item.id;
+    const id = item.device_id;
     if (typeof id !== "string" || !id.trim()) continue;
-    const name = item.device_name ?? item.name ?? "";
-    const typ = item.device_type ?? item.type ?? "";
-    const la = item.last_active_at ?? item.lastActiveAt ?? item.updated_at ?? item.updatedAt;
+    const name = item.device_name ?? "";
+    const typ = item.device_type ?? "";
+    const la = item.last_active_at;
     let lastAt = null;
     if (typeof la === "number" && Number.isFinite(la)) lastAt = la;
     else if (typeof la === "string" && la.trim() !== "") {
@@ -15870,10 +15869,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       return false;
     }
   }
-  syncQueryParams() {
-    if (!this.userId) throw new Error("user_id \u672A\u521D\u59CB\u5316");
-    return { user_id: this.userId };
-  }
   async loadMeta() {
     try {
       const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
@@ -15895,7 +15890,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   /** GET /files → path→meta 映射（仅 map；解析一次后 normalize，不再覆盖） */
   async fetchRemoteFiles() {
     const res = await axios_default.get(this.baseUrl + "/files", {
-      params: this.syncQueryParams(),
       headers: this.deviceHeaders(),
       responseType: "text"
     });
@@ -15945,7 +15939,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           hash,
           updated_at
         },
-        { params: this.syncQueryParams(), headers: this.deviceHeaders() }
+        { headers: this.deviceHeaders() }
       );
       meta[normalized] = {
         hash,
@@ -15961,7 +15955,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     const normalized = normalizeVaultPath(filePath);
     try {
       const res = await axios_default.get(this.baseUrl + "/download", {
-        params: { path: normalized, ...this.syncQueryParams() },
+        params: { path: normalized },
         headers: this.deviceHeaders(),
         responseType: "text"
       });
@@ -15990,7 +15984,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   async writeConflictFromRemote(filePath) {
     const normalized = normalizeVaultPath(filePath);
     const res = await axios_default.get(this.baseUrl + "/download", {
-      params: { path: normalized, ...this.syncQueryParams() },
+      params: { path: normalized },
       headers: this.deviceHeaders(),
       responseType: "text"
     });
@@ -16013,7 +16007,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       {
         path: normalized
       },
-      { params: this.syncQueryParams(), headers: this.deviceHeaders() }
+      { headers: this.deviceHeaders() }
     );
   }
   async deleteLocalFile(path) {
