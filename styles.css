@@ -43,3 +43,23 @@
 .vault-sync-binding-expired {
 	opacity: 0.88;
 }
+
+.vault-sync-device-table {
+	width: 100%;
+	border-collapse: collapse;
+	margin-top: 0.5em;
+	font-size: var(--font-ui-small);
+}
+
+.vault-sync-device-table th,
+.vault-sync-device-table td {
+	padding: 0.35em 0.5em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	text-align: left;
+	vertical-align: top;
+}
+
+.vault-sync-tag-current {
+	color: var(--text-accent);
+	font-size: var(--font-ui-smaller);
+}

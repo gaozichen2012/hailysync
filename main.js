@@ -10317,15 +10317,15 @@ var require_proxy_from_env = __commonJS({
     function getProxyForUrl(url2) {
       var parsedUrl = typeof url2 === "string" ? parseUrl(url2) : url2 || {};
       var proto = parsedUrl.protocol;
-      var hostname = parsedUrl.host;
+      var hostname2 = parsedUrl.host;
       var port = parsedUrl.port;
-      if (typeof hostname !== "string" || !hostname || typeof proto !== "string") {
+      if (typeof hostname2 !== "string" || !hostname2 || typeof proto !== "string") {
         return "";
       }
       proto = proto.split(":", 1)[0];
-      hostname = hostname.replace(/:\d*$/, "");
+      hostname2 = hostname2.replace(/:\d*$/, "");
       port = parseInt(port) || DEFAULT_PORTS[proto] || 0;
-      if (!shouldProxy(hostname, port)) {
+      if (!shouldProxy(hostname2, port)) {
         return "";
       }
       var proxy = getEnv("npm_config_" + proto + "_proxy") || getEnv(proto + "_proxy") || getEnv("npm_config_proxy") || getEnv("all_proxy");
@@ -10334,7 +10334,7 @@ var require_proxy_from_env = __commonJS({
       }
       return proxy;
     }
-    function shouldProxy(hostname, port) {
+    function shouldProxy(hostname2, port) {
       var NO_PROXY = (getEnv("npm_config_no_proxy") || getEnv("no_proxy")).toLowerCase();
       if (!NO_PROXY) {
         return true;
@@ -10353,12 +10353,12 @@ var require_proxy_from_env = __commonJS({
           return true;
         }
         if (!/^[.*]/.test(parsedProxyHostname)) {
-          return hostname !== parsedProxyHostname;
+          return hostname2 !== parsedProxyHostname;
         }
         if (parsedProxyHostname.charAt(0) === "*") {
           parsedProxyHostname = parsedProxyHostname.slice(1);
         }
-        return !stringEndsWith.call(hostname, parsedProxyHostname);
+        return !stringEndsWith.call(hostname2, parsedProxyHostname);
       });
     }
     function getEnv(key) {
@@ -13151,8 +13151,8 @@ var http_default = isHttpAdapterSupported && function httpAdapter(config) {
     const isHttp2 = httpVersion === 2;
     if (lookup) {
       const _lookup = callbackify_default(lookup, (value) => utils_default.isArray(value) ? value : [value]);
-      lookup = (hostname, opt, cb) => {
-        _lookup(hostname, opt, (err, arg0, arg1) => {
+      lookup = (hostname2, opt, cb) => {
+        _lookup(hostname2, opt, (err, arg0, arg1) => {
           if (err) {
             return cb(err);
           }
@@ -14880,17 +14880,9 @@ var {
 
 // main.ts
 var import_blueimp_md5 = __toESM(require_md5());
+var import_os = require("os");
 var SYNC_META_FILENAME = ".sync_meta.json";
 var SYNC_CONFIG_FILENAME = ".sync_config.json";
-function generateUserId() {
-  const c = globalThis.crypto;
-  if (c?.randomUUID) return c.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
-    const r = Math.random() * 16 | 0;
-    const v = ch === "x" ? r : r & 3 | 8;
-    return v.toString(16);
-  });
-}
 async function ensureVaultFoldersForPath(vault, filePath) {
   const normalized = filePath.replace(/\\/g, "/");
   const lastSlash = normalized.lastIndexOf("/");
@@ -15052,6 +15044,93 @@ function extractRemoteFilesMapPayload(parsed) {
   return out;
 }
 var BUILTIN_DEFAULT_SERVER_URL = "http://120.77.77.185:3000";
+var BINDING_CODE_SHOW_MS = 2e4;
+var BINDING_COPY_FEEDBACK_MS = 2500;
+function getDeviceTypeLabel() {
+  const p = (0, import_os.platform)();
+  if (p === "win32") return "windows";
+  if (p === "darwin") return "mac";
+  if (p === "linux") return "linux";
+  return p || "unknown";
+}
+function getDeviceDisplayName() {
+  try {
+    const h = (0, import_os.hostname)();
+    if (h && typeof h === "string" && h.trim()) return h.trim();
+  } catch {
+  }
+  return "Obsidian";
+}
+function maskBindingCode(code) {
+  const s = code.trim();
+  if (!s) return "";
+  const parts = s.split("-").filter(Boolean);
+  if (parts.length >= 3) {
+    return `${parts[0]}-****-${parts[parts.length - 1]}`;
+  }
+  if (s.length <= 8) return "****";
+  return `${s.slice(0, 4)}-****-${s.slice(-4)}`;
+}
+function extractBindingCodeFromJson(data) {
+  if (typeof data === "string" && data.trim()) return data.trim();
+  if (!isPlainObjectRecord(data)) return null;
+  const c = data.binding_code ?? data.bindingCode ?? data.code;
+  if (typeof c === "string" && c.trim()) return c.trim();
+  return null;
+}
+function parseDevicesListPayload(data) {
+  const rows = [];
+  let arr = [];
+  if (Array.isArray(data)) arr = data;
+  else if (isPlainObjectRecord(data)) {
+    const list = data.devices ?? data.data ?? data.list;
+    if (Array.isArray(list)) arr = list;
+  }
+  for (const item of arr) {
+    if (!isPlainObjectRecord(item)) continue;
+    const id = item.device_id ?? item.id;
+    if (typeof id !== "string" || !id.trim()) continue;
+    const name = item.device_name ?? item.name ?? "";
+    const typ = item.device_type ?? item.type ?? "";
+    const la = item.last_active_at ?? item.lastActiveAt ?? item.updated_at ?? item.updatedAt;
+    let lastAt = null;
+    if (typeof la === "number" && Number.isFinite(la)) lastAt = la;
+    else if (typeof la === "string" && la.trim() !== "") {
+      const n = Number(la);
+      if (Number.isFinite(n)) lastAt = n;
+    }
+    rows.push({
+      device_id: id.trim(),
+      device_name: typeof name === "string" ? name : String(name),
+      device_type: typeof typ === "string" ? typ : String(typ),
+      last_active_at: lastAt
+    });
+  }
+  return rows;
+}
+function isDeviceRevokedError(err) {
+  if (!isAxiosError2(err)) return false;
+  const data = err.response?.data;
+  if (isPlainObjectRecord(data) && typeof data.error === "string") {
+    return data.error === "DEVICE_REVOKED";
+  }
+  if (typeof data === "string" && data.trim()) {
+    try {
+      const parsed = JSON.parse(data.trim());
+      if (isPlainObjectRecord(parsed) && typeof parsed.error === "string") {
+        return parsed.error === "DEVICE_REVOKED";
+      }
+    } catch {
+    }
+  }
+  return false;
+}
+function isNetworkError(err) {
+  if (!isAxiosError2(err)) return false;
+  if (err.code === "ECONNABORTED") return true;
+  if (!err.response) return true;
+  return false;
+}
 var DEFAULT_SETTINGS = {
   serverUrl: BUILTIN_DEFAULT_SERVER_URL,
   enableSync: true
@@ -15088,22 +15167,21 @@ function formatSyncError(err) {
   if (err instanceof Error && err.message) return err.message;
   return String(err);
 }
-var BINDING_CODE_TTL_MS = 3e4;
-var BINDING_COPY_FEEDBACK_MS = 2500;
 var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   plugin;
-  /** 当前展示的绑定码（不落盘） */
-  bindingCode = null;
-  /** 绑定码界面隐藏时间戳（毫秒） */
-  bindingExpireAt = null;
+  maskedBindingText = "";
+  revealedFullCode = null;
+  revealExpireAt = null;
   bindingError = null;
   bindingCopyFeedback = null;
-  bindingExpiredHint = false;
   bindingPanelEl = null;
   bindingCountdownInterval = null;
   bindingHideTimeout = null;
   bindingCopyFeedbackTimeout = null;
-  bindingRequestGen = 0;
+  deviceListEl = null;
+  devices = [];
+  devicesError = null;
+  devicesLoading = false;
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -15123,11 +15201,10 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       this.bindingCopyFeedbackTimeout = null;
     }
   }
-  syncBindingExpiryState() {
-    if (this.bindingCode && this.bindingExpireAt != null && Date.now() >= this.bindingExpireAt) {
-      this.bindingCode = null;
-      this.bindingExpireAt = null;
-      this.bindingExpiredHint = true;
+  syncRevealExpiry() {
+    if (this.revealedFullCode && this.revealExpireAt != null && Date.now() >= this.revealExpireAt) {
+      this.revealedFullCode = null;
+      this.revealExpireAt = null;
     }
   }
   renderBindingPanel() {
@@ -15146,55 +15223,39 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         text: this.bindingCopyFeedback
       });
     }
-    this.syncBindingExpiryState();
-    if (this.bindingCode && this.bindingExpireAt != null && Date.now() < this.bindingExpireAt) {
-      panel.createEl("div", {
-        cls: "setting-item-description vault-sync-binding-success",
-        text: "\u751F\u6210\u6210\u529F"
-      });
+    this.syncRevealExpiry();
+    if (this.revealedFullCode && this.revealExpireAt != null && Date.now() < this.revealExpireAt) {
       const row = panel.createDiv({ cls: "vault-sync-binding-code-row" });
       row.createSpan({ text: "\u7ED1\u5B9A\u7801\uFF1A" });
       row.createSpan({
         cls: "vault-sync-binding-code",
-        text: this.bindingCode
+        text: this.revealedFullCode
       });
-      const copyBtn = row.createEl("button", {
-        cls: "vault-sync-binding-copy-btn",
-        text: "\u590D\u5236",
-        type: "button"
-      });
-      copyBtn.addEventListener("click", () => {
-        void this.copyBindingCodeToClipboard(this.bindingCode ?? "");
-      });
-      const sec = Math.max(
-        0,
-        Math.ceil((this.bindingExpireAt - Date.now()) / 1e3)
-      );
+      const sec = Math.max(0, Math.ceil((this.revealExpireAt - Date.now()) / 1e3));
       row.createSpan({
         cls: "vault-sync-binding-countdown",
-        text: `\uFF08${sec}s \u540E\u81EA\u52A8\u5931\u6548\uFF09`
+        text: `\uFF08${sec}s \u540E\u81EA\u52A8\u9690\u85CF\uFF09`
       });
-    } else if (this.bindingExpiredHint) {
+    } else {
       panel.createEl("div", {
-        cls: "setting-item-description vault-sync-binding-expired",
-        text: "\u7ED1\u5B9A\u7801\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210"
+        cls: "setting-item-description",
+        text: `\u8131\u654F\u7ED1\u5B9A\u7801\uFF1A${this.maskedBindingText || "\u2014"}`
       });
     }
   }
-  scheduleBindingTimersIfNeeded() {
-    if (!this.bindingCode || this.bindingExpireAt == null) return;
-    const remain = this.bindingExpireAt - Date.now();
+  scheduleRevealHide() {
+    if (!this.revealedFullCode || this.revealExpireAt == null) return;
+    const remain = this.revealExpireAt - Date.now();
     if (remain <= 0) {
-      this.bindingCode = null;
-      this.bindingExpiredHint = true;
+      this.revealedFullCode = null;
+      this.revealExpireAt = null;
       this.renderBindingPanel();
       return;
     }
     this.bindingHideTimeout = window.setTimeout(() => {
       this.bindingHideTimeout = null;
-      this.bindingCode = null;
-      this.bindingExpireAt = null;
-      this.bindingExpiredHint = true;
+      this.revealedFullCode = null;
+      this.revealExpireAt = null;
       if (this.bindingCountdownInterval != null) {
         window.clearInterval(this.bindingCountdownInterval);
         this.bindingCountdownInterval = null;
@@ -15202,8 +15263,8 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       this.renderBindingPanel();
     }, remain);
     this.bindingCountdownInterval = window.setInterval(() => {
-      this.syncBindingExpiryState();
-      if (!this.bindingCode) {
+      this.syncRevealExpiry();
+      if (!this.revealedFullCode) {
         this.clearBindingTimers();
         this.renderBindingPanel();
         return;
@@ -15211,8 +15272,39 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       this.renderBindingPanel();
     }, 1e3);
   }
-  async copyBindingCodeToClipboard(code) {
-    if (!code) return;
+  async refreshBindingMaskOnly() {
+    const code = await this.plugin.fetchBindingCodeRaw();
+    this.maskedBindingText = code ? maskBindingCode(code) : "";
+  }
+  async onShowReveal() {
+    if (!this.plugin.deviceId) {
+      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u7ED1\u5B9A");
+      return;
+    }
+    this.clearBindingTimers();
+    this.bindingError = null;
+    const code = await this.plugin.fetchBindingCodeRaw();
+    if (!code) {
+      this.bindingError = "\u65E0\u6CD5\u83B7\u53D6\u7ED1\u5B9A\u7801";
+      this.renderBindingPanel();
+      return;
+    }
+    this.revealedFullCode = code;
+    this.revealExpireAt = Date.now() + BINDING_CODE_SHOW_MS;
+    this.renderBindingPanel();
+    this.scheduleRevealHide();
+  }
+  async copyFullBindingCode() {
+    if (!this.plugin.deviceId) {
+      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u7ED1\u5B9A");
+      return;
+    }
+    const code = await this.plugin.fetchBindingCodeRaw();
+    if (!code) {
+      this.bindingError = "\u65E0\u6CD5\u83B7\u53D6\u7ED1\u5B9A\u7801";
+      this.renderBindingPanel();
+      return;
+    }
     try {
       await navigator.clipboard.writeText(code);
       this.bindingCopyFeedback = "\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F";
@@ -15224,71 +15316,174 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         this.bindingCopyFeedback = null;
         this.renderBindingPanel();
       }, BINDING_COPY_FEEDBACK_MS);
+      this.bindingError = null;
       this.renderBindingPanel();
     } catch {
       this.bindingCopyFeedback = null;
-      this.bindingError = "\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u4E2D\u7ED1\u5B9A\u7801\u590D\u5236";
+      this.bindingError = "\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u590D\u5236";
       this.renderBindingPanel();
     }
   }
-  async requestBindingCode() {
-    const gen = ++this.bindingRequestGen;
+  async onResetBinding() {
+    if (!this.plugin.deviceId) {
+      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u7ED1\u5B9A");
+      return;
+    }
     this.clearBindingTimers();
+    this.revealedFullCode = null;
+    this.revealExpireAt = null;
     this.bindingError = null;
-    this.bindingCopyFeedback = null;
-    this.bindingExpiredHint = false;
-    this.renderBindingPanel();
-    const result = await this.plugin.requestCreateBindingCode();
-    if (gen !== this.bindingRequestGen) return;
-    if (result.ok) {
-      this.bindingCode = result.code;
-      this.bindingExpireAt = Date.now() + BINDING_CODE_TTL_MS;
-      this.bindingError = null;
+    const ok = await this.plugin.resetBindingCodeOnServer();
+    if (ok) {
+      await this.refreshBindingMaskOnly();
+      new import_obsidian.Notice("\u7ED1\u5B9A\u7801\u5DF2\u91CD\u7F6E");
     } else {
-      this.bindingCode = null;
-      this.bindingExpireAt = null;
-      this.bindingError = result.message;
+      this.bindingError = "\u91CD\u7F6E\u5931\u8D25";
     }
     this.renderBindingPanel();
-    this.scheduleBindingTimersIfNeeded();
+  }
+  renderDeviceList() {
+    const wrap = this.deviceListEl;
+    if (!wrap) return;
+    wrap.empty();
+    if (!this.plugin.deviceId) {
+      wrap.createEl("div", {
+        cls: "setting-item-description",
+        text: "\u8BBE\u5907\u672A\u8FDE\u63A5\uFF0C\u7ED1\u5B9A\u6216\u521D\u59CB\u5316\u6210\u529F\u540E\u5373\u53EF\u7BA1\u7406\u8BBE\u5907\u5217\u8868\u3002"
+      });
+      return;
+    }
+    if (this.devicesLoading) {
+      wrap.createEl("div", { cls: "setting-item-description", text: "\u52A0\u8F7D\u4E2D\u2026" });
+      return;
+    }
+    if (this.devicesError) {
+      wrap.createEl("div", {
+        cls: "setting-item-description vault-sync-binding-error",
+        text: this.devicesError
+      });
+      return;
+    }
+    if (this.devices.length === 0) {
+      wrap.createEl("div", { cls: "setting-item-description", text: "\u6682\u65E0\u8BBE\u5907" });
+      return;
+    }
+    const table = wrap.createEl("table", { cls: "vault-sync-device-table" });
+    const thead = table.createEl("thead");
+    const hr = thead.createEl("tr");
+    hr.createEl("th", { text: "\u8BBE\u5907\u540D" });
+    hr.createEl("th", { text: "\u7C7B\u578B" });
+    hr.createEl("th", { text: "\u6700\u8FD1\u6D3B\u8DC3" });
+    hr.createEl("th", { text: "\u64CD\u4F5C" });
+    const tbody = table.createEl("tbody");
+    for (const d of this.devices) {
+      const tr = tbody.createEl("tr");
+      tr.createEl("td", { text: d.device_name || "\u2014" });
+      tr.createEl("td", { text: d.device_type || "\u2014" });
+      const last = d.last_active_at != null && Number.isFinite(d.last_active_at) ? new Date(d.last_active_at).toLocaleString() : "\u2014";
+      const tdMark = tr.createEl("td");
+      tdMark.appendText(last);
+      if (d.device_id === this.plugin.deviceId) {
+        tdMark.appendText(" ");
+        tdMark.createSpan({ cls: "vault-sync-tag-current", text: "\uFF08\u5F53\u524D\u8BBE\u5907\uFF09" });
+      }
+      const tdOp = tr.createEl("td");
+      const isCurrent = d.device_id === this.plugin.deviceId;
+      if (!isCurrent) {
+        const btn = tdOp.createEl("button", { cls: "vault-sync-binding-copy-btn", text: "\u5220\u9664" });
+        btn.type = "button";
+        btn.addEventListener("click", () => {
+          if (window.confirm(`\u786E\u5B9A\u4ECE\u8D26\u53F7\u4E2D\u79FB\u9664\u8BBE\u5907\u300C${d.device_name || d.device_id}\u300D\uFF1F`)) {
+            void this.plugin.deleteDeviceOnServer(d.device_id).then((ok) => {
+              if (ok) void this.reloadDevices();
+            });
+          }
+        });
+      } else {
+        tdOp.createSpan({ cls: "setting-item-description", text: "\u2014" });
+      }
+    }
+  }
+  async reloadDevices() {
+    if (!this.plugin.deviceId) {
+      this.devices = [];
+      this.renderDeviceList();
+      return;
+    }
+    this.devicesLoading = true;
+    this.devicesError = null;
+    this.renderDeviceList();
+    const res = await this.plugin.fetchDevicesList();
+    this.devicesLoading = false;
+    if (res.ok) {
+      this.devices = res.devices;
+    } else {
+      this.devicesError = res.message;
+    }
+    this.renderDeviceList();
+  }
+  statusLine() {
+    const st = this.plugin.connectionState;
+    if (st === "initializing") return "\u72B6\u6001\uFF1A\u672A\u521D\u59CB\u5316\u2026";
+    if (st === "connected") return "\u72B6\u6001\uFF1A\u5DF2\u8FDE\u63A5";
+    if (this.plugin.wasRevoked) return "\u72B6\u6001\uFF1A\u5DF2\u5931\u6548\uFF08\u88AB\u5220\u9664\uFF09";
+    return "\u72B6\u6001\uFF1A\u5F85\u7ED1\u5B9A\uFF08\u8BF7\u8F93\u5165\u7ED1\u5B9A\u7801\u6216\u7B49\u5F85\u521D\u59CB\u5316\uFF09";
   }
   display() {
     const { containerEl } = this;
     containerEl.empty();
     this.clearBindingTimers();
     this.bindingPanelEl = null;
+    this.deviceListEl = null;
     this.bindingCopyFeedback = null;
-    this.syncBindingExpiryState();
+    this.revealedFullCode = null;
+    this.revealExpireAt = null;
+    this.bindingError = null;
+    this.devicesError = null;
     containerEl.createEl("h2", { text: "Vault Sync" });
+    const statusSection = containerEl.createDiv();
+    statusSection.createEl("div", { cls: "setting-item-description", text: this.statusLine() });
     const identitySection = containerEl.createDiv();
     identitySection.createEl("div", {
       cls: "setting-item-description",
       text: "\u6B63\u5728\u8BFB\u53D6\u8EAB\u4EFD\u2026"
     });
-    void this.plugin.ensureSyncIdentity().then(() => {
-      identitySection.empty();
-      identitySection.createEl("div", {
-        cls: "setting-item-description",
-        text: `\u5F53\u524D user_id\uFF1A${this.plugin.userId}`
-      });
-    });
     const bindingBlock = containerEl.createDiv({ cls: "vault-sync-binding-block" });
-    new import_obsidian.Setting(bindingBlock).setName("\u751F\u6210\u7ED1\u5B9A\u7801").setDesc("\u5728\u5F53\u524D\u8BBE\u5907\u5411\u670D\u52A1\u7AEF\u7533\u8BF7\u4E00\u6B21\u6027\u7ED1\u5B9A\u7801\uFF0C\u4F9B\u53E6\u4E00\u53F0\u8BBE\u5907\u8F93\u5165\u540E\u5171\u4EAB\u540C\u4E00 user_id\u3002\u7ED1\u5B9A\u7801\u4EC5\u663E\u793A\u3001\u4E0D\u7F13\u5B58\u3002").addButton(
-      (btn) => btn.setButtonText("\u751F\u6210\u7ED1\u5B9A\u7801").onClick(() => {
-        void this.requestBindingCode();
+    bindingBlock.createEl("div", {
+      cls: "setting-item-description",
+      text: "\u8FD9\u662F\u4F60\u8FDE\u63A5\u65B0\u8BBE\u5907\u548C\u6062\u590D\u540C\u6B65\u8EAB\u4EFD\u7684\u552F\u4E00\u51ED\u8BC1\uFF0C\u8BF7\u59A5\u5584\u4FDD\u5B58\u3002"
+    });
+    new import_obsidian.Setting(bindingBlock).setName("\u8BBE\u5907\u7ED1\u5B9A\u7801").setDesc("\u300C\u663E\u793A\u300D\u540E\u5B8C\u6574\u7801 20 \u79D2\u81EA\u52A8\u9690\u85CF\uFF1B\u300C\u590D\u5236\u300D\u59CB\u7EC8\u590D\u5236\u5B8C\u6574\u7801\uFF1B\u300C\u91CD\u7F6E\u300D\u540E\u65E7\u7801\u5931\u6548\u3002").addButton(
+      (btn) => btn.setButtonText("\u663E\u793A").onClick(() => {
+        void this.onShowReveal();
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("\u590D\u5236").onClick(() => {
+        void this.copyFullBindingCode();
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("\u91CD\u7F6E").onClick(() => {
+        void this.onResetBinding();
       })
     );
     this.bindingPanelEl = bindingBlock.createDiv({ cls: "vault-sync-binding-panel" });
     this.renderBindingPanel();
-    this.scheduleBindingTimersIfNeeded();
+    const devBlock = containerEl.createDiv({ cls: "vault-sync-devices-block" });
+    new import_obsidian.Setting(devBlock).setName("\u5DF2\u7ED1\u5B9A\u8BBE\u5907").setDesc("\u5220\u9664\u5176\u4ED6\u8BBE\u5907\u540E\uFF0C\u8BE5\u8BBE\u5907\u5C06\u505C\u6B62\u540C\u6B65\u3002\u5F53\u524D\u8BBE\u5907\u4E0D\u53EF\u5220\u9664\u3002").addButton(
+      (btn) => btn.setButtonText("\u5237\u65B0\u5217\u8868").onClick(() => {
+        void this.reloadDevices();
+      })
+    );
+    this.deviceListEl = devBlock.createDiv({ cls: "vault-sync-device-list" });
+    this.renderDeviceList();
     let bindingInput = null;
-    new import_obsidian.Setting(containerEl).setName("\u7ED1\u5B9A\u5230\u65B0\u8BBE\u5907\uFF08\u8F93\u5165\u7ED1\u5B9A\u7801\uFF09").setDesc("\u5728\u65B0\u8BBE\u5907\u4E0A\u8F93\u5165\u65E7\u8BBE\u5907\u751F\u6210\u7684\u7ED1\u5B9A\u7801\u540E\u786E\u8BA4\uFF0C\u5C06\u7528\u8FD4\u56DE\u7684 user_id \u8986\u76D6\u672C\u5730\u914D\u7F6E\u5E76\u7ACB\u5373\u751F\u6548\uFF08\u4E0D\u505A\u6570\u636E\u8FC1\u79FB\uFF09\u3002").addText((text) => {
+    new import_obsidian.Setting(containerEl).setName("\u7ED1\u5B9A\u65B0\u8BBE\u5907").setDesc("\u8F93\u5165 binding_code \u540E\u7ED1\u5B9A\uFF1B\u6210\u529F\u540E\u5C06\u4FDD\u5B58 user_id / device_id \u5E76\u5F00\u59CB\u540C\u6B65\u3002").addText((text) => {
       bindingInput = text.inputEl;
-      text.setPlaceholder("\u7ED1\u5B9A\u7801");
+      text.setPlaceholder("binding_code");
     }).addButton(
-      (btn) => btn.setButtonText("\u786E\u8BA4\u7ED1\u5B9A").onClick(() => {
+      (btn) => btn.setButtonText("\u7ED1\u5B9A").onClick(() => {
         const code = bindingInput?.value?.trim() ?? "";
-        void this.plugin.consumeBindingCode(code).then((ok) => {
+        void this.plugin.bindWithCode(code).then((ok) => {
           if (ok) this.display();
         });
       })
@@ -15314,6 +15509,28 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    void this.plugin.ensureDeviceIdentity().then(async () => {
+      statusSection.empty();
+      statusSection.createEl("div", { cls: "setting-item-description", text: this.statusLine() });
+      identitySection.empty();
+      identitySection.createEl("div", {
+        cls: "setting-item-description",
+        text: `user_id\uFF1A${this.plugin.userId || "\u2014"}`
+      });
+      identitySection.createEl("div", {
+        cls: "setting-item-description",
+        text: `device_id\uFF1A${this.plugin.deviceId || "\u2014"}`
+      });
+      identitySection.createEl("div", {
+        cls: "setting-item-description",
+        text: `server_url\uFF08\u63D2\u4EF6\u8BBE\u7F6E\uFF09\uFF1A${this.plugin.baseUrl}`
+      });
+      if (this.plugin.connectionState === "connected" && this.plugin.deviceId) {
+        await this.refreshBindingMaskOnly();
+        this.renderBindingPanel();
+        void this.reloadDevices();
+      }
+    });
   }
 };
 var SYNC_STATUS_RESULT_MS = 3500;
@@ -15322,15 +15539,19 @@ var AUTO_SYNC_START_MIN_MS = 2e3;
 var AUTO_SYNC_START_MAX_MS = 5e3;
 var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   settings = DEFAULT_SETTINGS;
-  /** 由 `.sync_config.json` 加载或生成；仅绑定成功时覆盖 */
+  /** 由 `.sync_config.json` 与服务端同步 */
   userId = "";
+  deviceId = "";
+  connectionState = "initializing";
+  /** 是否因 DEVICE_REVOKED 进入待绑定（与 .sync_config.json 的 was_revoked 一致） */
+  wasRevoked = false;
   syncRunning = false;
   statusBarItem = null;
   statusResultTimer = null;
   autoSyncStartupTimerId = null;
   async onload() {
     await this.loadSettings();
-    await this.ensureSyncIdentity();
+    await this.ensureDeviceIdentity();
     this.initSyncStatusBar();
     this.addSettingTab(new VaultSyncSettingTab(this.app, this));
     this.addCommand({
@@ -15343,7 +15564,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     const startupDelay = AUTO_SYNC_START_MIN_MS + Math.floor(Math.random() * (AUTO_SYNC_START_MAX_MS - AUTO_SYNC_START_MIN_MS + 1));
     this.autoSyncStartupTimerId = window.setTimeout(() => {
       this.autoSyncStartupTimerId = null;
-      if (this.settings.enableSync) {
+      if (this.settings.enableSync && this.connectionState === "connected" && this.deviceId) {
         void this.syncNow({ auto: true });
       }
     }, startupDelay);
@@ -15355,6 +15576,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     });
     const intervalId = window.setInterval(() => {
       if (!this.settings.enableSync) return;
+      if (this.connectionState !== "connected" || !this.deviceId) return;
       void this.syncNow({ auto: true });
     }, AUTO_SYNC_INTERVAL_MS);
     this.registerInterval(intervalId);
@@ -15418,62 +15640,194 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   get baseUrl() {
     return this.settings.serverUrl.trim().replace(/\/+$/, "");
   }
-  /** 启动或首次需要时读取/生成 user_id 并写入 `.sync_config.json` */
-  async ensureSyncIdentity() {
-    if (this.userId) return this.userId;
+  deviceHeaders() {
+    if (!this.deviceId) return {};
+    return { "x-device-id": this.deviceId };
+  }
+  /** pending_bind 时仅待绑定；否则读盘或 POST /api/init */
+  async ensureDeviceIdentity() {
+    if (this.userId && this.deviceId && this.connectionState === "connected") return;
     try {
       const raw = await this.app.vault.adapter.read(SYNC_CONFIG_FILENAME);
       const parsed = JSON.parse(raw || "{}");
-      if (isPlainObjectRecord(parsed) && typeof parsed.user_id === "string" && parsed.user_id.trim() !== "") {
+      if (isPlainObjectRecord(parsed) && parsed.pending_bind === true) {
+        this.userId = "";
+        this.deviceId = "";
+        this.wasRevoked = parsed.was_revoked === true;
+        this.connectionState = "awaiting_bind";
+        return;
+      }
+      if (isPlainObjectRecord(parsed) && typeof parsed.user_id === "string" && parsed.user_id.trim() !== "" && typeof parsed.device_id === "string" && parsed.device_id.trim() !== "") {
         this.userId = parsed.user_id.trim();
-        return this.userId;
+        this.deviceId = parsed.device_id.trim();
+        this.wasRevoked = false;
+        this.connectionState = "connected";
+        return;
+      }
+      if (isPlainObjectRecord(parsed) && typeof parsed.user_id === "string" && parsed.user_id.trim() !== "" && !parsed.device_id) {
+        this.userId = "";
+        this.deviceId = "";
+        this.wasRevoked = false;
+        this.connectionState = "awaiting_bind";
+        await this.app.vault.adapter.write(
+          SYNC_CONFIG_FILENAME,
+          JSON.stringify({ pending_bind: true }, null, 2)
+        );
+        new import_obsidian.Notice("\u68C0\u6D4B\u5230\u65E7\u7248\u4EC5 user_id \u7684\u914D\u7F6E\uFF0C\u8BF7\u8F93\u5165\u7ED1\u5B9A\u7801\u5B8C\u6210\u8BBE\u5907\u7ED1\u5B9A", 12e3);
+        return;
       }
     } catch {
     }
-    const id = generateUserId();
-    await this.persistSyncIdentity(id);
-    return this.userId;
+    this.connectionState = "initializing";
+    await this.callApiInit();
   }
-  /** 仅绑定成功时调用：覆盖内存与本地配置 */
-  async persistSyncIdentity(userId) {
-    const next = userId.trim();
-    if (!next) throw new Error("user_id \u65E0\u6548");
-    this.userId = next;
-    await this.app.vault.adapter.write(
-      SYNC_CONFIG_FILENAME,
-      JSON.stringify({ user_id: this.userId }, null, 2)
-    );
-  }
-  syncQueryParams() {
-    if (!this.userId) throw new Error("user_id \u672A\u521D\u59CB\u5316");
-    return { user_id: this.userId };
-  }
-  /** 创建绑定码（仅请求；展示与倒计时由设置页负责） */
-  async requestCreateBindingCode() {
-    await this.ensureSyncIdentity();
+  async callApiInit() {
     const server = this.baseUrl;
     if (!server) {
-      return { ok: false, message: "\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740" };
+      this.connectionState = "awaiting_bind";
+      new import_obsidian.Notice("\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740");
+      return;
     }
     try {
-      const res = await axios_default.post(
-        `${server}/binding-code/create`,
-        { user_id: this.userId },
-        { params: this.syncQueryParams() }
-      );
-      const code = res.data?.code;
-      if (typeof code !== "string" || code.trim() === "") {
-        return { ok: false, message: "\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548\u7ED1\u5B9A\u7801" };
+      const res = await axios_default.post(`${server}/api/init`, {
+        device_name: getDeviceDisplayName(),
+        device_type: getDeviceTypeLabel()
+      });
+      const uid = res.data?.user_id;
+      const did = res.data?.device_id;
+      if (typeof uid !== "string" || !uid.trim() || typeof did !== "string" || !did.trim()) {
+        this.connectionState = "awaiting_bind";
+        new import_obsidian.Notice("\u521D\u59CB\u5316\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE user_id / device_id");
+        return;
       }
-      return { ok: true, code: code.trim() };
+      await this.persistFullIdentity(uid.trim(), did.trim());
     } catch (e) {
+      this.connectionState = "awaiting_bind";
+      if (isNetworkError(e)) {
+        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+      } else {
+        new import_obsidian.Notice("\u521D\u59CB\u5316\u5931\u8D25\uFF1A" + formatSyncError(e));
+      }
+    }
+  }
+  async persistFullIdentity(userId, deviceId) {
+    this.userId = userId.trim();
+    this.deviceId = deviceId.trim();
+    this.connectionState = "connected";
+    this.wasRevoked = false;
+    await this.app.vault.adapter.write(
+      SYNC_CONFIG_FILENAME,
+      JSON.stringify(
+        { user_id: this.userId, device_id: this.deviceId },
+        null,
+        2
+      )
+    );
+  }
+  async handleDeviceRevoked() {
+    this.connectionState = "awaiting_bind";
+    this.wasRevoked = true;
+    this.userId = "";
+    this.deviceId = "";
+    await this.app.vault.adapter.write(
+      SYNC_CONFIG_FILENAME,
+      JSON.stringify(
+        { pending_bind: true, was_revoked: true },
+        null,
+        2
+      )
+    );
+  }
+  async fetchBindingCodeRaw() {
+    await this.ensureDeviceIdentity();
+    if (!this.deviceId) return null;
+    const server = this.baseUrl;
+    if (!server) return null;
+    try {
+      const res = await axios_default.get(`${server}/api/binding-code`, {
+        headers: this.deviceHeaders()
+      });
+      return extractBindingCodeFromJson(res.data);
+    } catch (e) {
+      if (isDeviceRevokedError(e)) {
+        await this.handleDeviceRevoked();
+        new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        return null;
+      }
+      if (isNetworkError(e)) {
+        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        return null;
+      }
+      return null;
+    }
+  }
+  async resetBindingCodeOnServer() {
+    if (!this.deviceId) return false;
+    const server = this.baseUrl;
+    if (!server) return false;
+    try {
+      await axios_default.post(`${server}/api/binding-code/reset`, {}, { headers: this.deviceHeaders() });
+      return true;
+    } catch (e) {
+      if (isDeviceRevokedError(e)) {
+        await this.handleDeviceRevoked();
+        new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        return false;
+      }
+      if (isNetworkError(e)) {
+        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        return false;
+      }
+      return false;
+    }
+  }
+  async fetchDevicesList() {
+    if (!this.deviceId) return { ok: false, message: "\u65E0\u6548\u7684\u8BBE\u5907" };
+    try {
+      const res = await axios_default.get(`${this.baseUrl}/api/devices`, {
+        headers: this.deviceHeaders()
+      });
+      const devices = parseDevicesListPayload(res.data);
+      return { ok: true, devices };
+    } catch (e) {
+      if (isDeviceRevokedError(e)) {
+        await this.handleDeviceRevoked();
+        return { ok: false, message: "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664" };
+      }
+      if (isNetworkError(e)) {
+        return { ok: false, message: "\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5" };
+      }
       return { ok: false, message: formatSyncError(e) };
     }
   }
-  /** @returns 是否绑定成功（用于刷新设置页） */
-  async consumeBindingCode(rawCode) {
-    await this.ensureSyncIdentity();
-    const code = rawCode.trim();
+  async deleteDeviceOnServer(targetId) {
+    if (!this.deviceId) return false;
+    const server = this.baseUrl;
+    if (!server) return false;
+    try {
+      await axios_default.post(
+        `${server}/api/device/delete`,
+        { device_id: targetId },
+        { headers: this.deviceHeaders() }
+      );
+      new import_obsidian.Notice("\u5DF2\u5220\u9664\u8BBE\u5907");
+      return true;
+    } catch (e) {
+      if (isDeviceRevokedError(e)) {
+        await this.handleDeviceRevoked();
+        new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        return false;
+      }
+      if (isNetworkError(e)) {
+        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        return false;
+      }
+      new import_obsidian.Notice("\u5220\u9664\u5931\u8D25\uFF1A" + formatSyncError(e));
+      return false;
+    }
+  }
+  async bindWithCode(raw) {
+    const code = raw.trim();
     if (!code) {
       new import_obsidian.Notice("\u8BF7\u8F93\u5165\u7ED1\u5B9A\u7801");
       return false;
@@ -15485,22 +15839,40 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     }
     try {
       const res = await axios_default.post(
-        `${server}/binding-code/consume`,
-        { code },
-        { params: this.syncQueryParams() }
+        `${server}/api/bind`,
+        {
+          binding_code: code,
+          device_name: getDeviceDisplayName(),
+          device_type: getDeviceTypeLabel()
+        }
       );
       const uid = res.data?.user_id;
-      if (typeof uid !== "string" || uid.trim() === "") {
-        new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548 user_id", 6e3);
+      const did = res.data?.device_id;
+      if (typeof uid !== "string" || !uid.trim() || typeof did !== "string" || !did.trim()) {
+        new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548 user_id / device_id", 6e3);
         return false;
       }
-      await this.persistSyncIdentity(uid.trim());
-      new import_obsidian.Notice("\u5DF2\u7ED1\u5B9A\uFF1A\u540E\u7EED\u540C\u6B65\u5C06\u4F7F\u7528\u65B0\u7684 user_id", 8e3);
+      await this.persistFullIdentity(uid.trim(), did.trim());
+      new import_obsidian.Notice("\u5DF2\u7ED1\u5B9A\uFF0C\u5C06\u5F00\u59CB\u540C\u6B65");
+      void this.syncNow();
       return true;
     } catch (e) {
-      new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A" + formatSyncError(e), 8e3);
+      if (isDeviceRevokedError(e)) {
+        await this.handleDeviceRevoked();
+        new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        return false;
+      }
+      if (isNetworkError(e)) {
+        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        return false;
+      }
+      new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u7801\u65E0\u6548\u6216\u5DF2\u5931\u6548");
       return false;
     }
+  }
+  syncQueryParams() {
+    if (!this.userId) throw new Error("user_id \u672A\u521D\u59CB\u5316");
+    return { user_id: this.userId };
   }
   async loadMeta() {
     try {
@@ -15524,6 +15896,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   async fetchRemoteFiles() {
     const res = await axios_default.get(this.baseUrl + "/files", {
       params: this.syncQueryParams(),
+      headers: this.deviceHeaders(),
       responseType: "text"
     });
     const raw = res.data;
@@ -15572,7 +15945,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           hash,
           updated_at
         },
-        { params: this.syncQueryParams() }
+        { params: this.syncQueryParams(), headers: this.deviceHeaders() }
       );
       meta[normalized] = {
         hash,
@@ -15589,6 +15962,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     try {
       const res = await axios_default.get(this.baseUrl + "/download", {
         params: { path: normalized, ...this.syncQueryParams() },
+        headers: this.deviceHeaders(),
         responseType: "text"
       });
       const content = res.data || "";
@@ -15617,6 +15991,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     const normalized = normalizeVaultPath(filePath);
     const res = await axios_default.get(this.baseUrl + "/download", {
       params: { path: normalized, ...this.syncQueryParams() },
+      headers: this.deviceHeaders(),
       responseType: "text"
     });
     const content = res.data || "";
@@ -15638,7 +16013,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       {
         path: normalized
       },
-      { params: this.syncQueryParams() }
+      { params: this.syncQueryParams(), headers: this.deviceHeaders() }
     );
   }
   async deleteLocalFile(path) {
@@ -15650,7 +16025,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   async syncNow(options) {
     const isAuto = options?.auto === true;
-    await this.ensureSyncIdentity();
+    await this.ensureDeviceIdentity();
     if (this.syncRunning) {
       new import_obsidian.Notice("\u540C\u6B65\u5DF2\u5728\u8FDB\u884C\u4E2D");
       return;
@@ -15670,6 +16045,16 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         if (isAuto) console.log("[auto-sync] failed");
         return;
       }
+      if (!this.deviceId || this.connectionState !== "connected") {
+        this.setSyncStatusFailed();
+        if (this.wasRevoked) {
+          new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        } else {
+          new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u8F93\u5165\u7ED1\u5B9A\u7801\u540E\u518D\u540C\u6B65", 8e3);
+        }
+        if (isAuto) console.log("[auto-sync] failed");
+        return;
+      }
       if (isAuto) console.log("[auto-sync] start");
       this.setSyncStatusSyncing();
       new import_obsidian.Notice("\u6B63\u5728\u540C\u6B65\u2026");
@@ -15681,12 +16066,20 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       try {
         remote = await this.fetchRemoteFiles();
       } catch (err) {
-        const detail = formatSyncError(err);
+        if (isDeviceRevokedError(err)) {
+          await this.handleDeviceRevoked();
+          this.setSyncStatusFailed();
+          new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+          if (isAuto) console.log("[auto-sync] failed");
+          return;
+        }
         this.setSyncStatusFailed();
-        new import_obsidian.Notice(
-          `\u274C Sync Failed\uFF1A\u65E0\u6CD5\u8FDE\u63A5\u670D\u52A1\u5668\u6216\u62C9\u53D6 /files\uFF08${server}\uFF09\u3002${detail}`,
-          8e3
-        );
+        if (isNetworkError(err)) {
+          new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5", 8e3);
+        } else {
+          const detail = formatSyncError(err);
+          new import_obsidian.Notice(`\u274C Sync Failed\uFF1A\u65E0\u6CD5\u62C9\u53D6 /files\uFF08${server}\uFF09\u3002${detail}`, 8e3);
+        }
         if (isAuto) console.log("[auto-sync] failed");
         return;
       }
@@ -15794,6 +16187,13 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
             continue;
           }
         } catch (e) {
+          if (isDeviceRevokedError(e)) {
+            await this.handleDeviceRevoked();
+            this.setSyncStatusFailed();
+            new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+            if (isAuto) console.log("[auto-sync] failed");
+            return;
+          }
           console.error("sync step failed:", path, e);
           stepErrors.push(`${path}: ${formatSyncError(e)}`);
         }
@@ -15811,7 +16211,11 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       if (isAuto) console.log("[auto-sync] success");
     } catch (e) {
       this.setSyncStatusFailed();
-      new import_obsidian.Notice("\u274C Sync Failed\uFF1A" + formatSyncError(e), 8e3);
+      if (isNetworkError(e)) {
+        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5", 8e3);
+      } else {
+        new import_obsidian.Notice("\u274C Sync Failed\uFF1A" + formatSyncError(e), 8e3);
+      }
       if (isAuto) console.log("[auto-sync] failed");
     } finally {
       this.syncRunning = false;
