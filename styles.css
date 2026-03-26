@@ -1,3 +1,75 @@
+.vault-sync-section {
+	margin-top: 1em;
+	margin-bottom: 0.25em;
+}
+
+.vault-sync-section-label {
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	margin-bottom: 0.35em;
+}
+
+.vault-sync-guide-section {
+	padding: 0.85em 1em;
+	border-radius: var(--radius-m);
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+}
+
+.vault-sync-guide-title {
+	font-size: var(--font-ui-medium);
+	font-weight: 600;
+	line-height: 1.45;
+	margin-bottom: 0.35em;
+}
+
+.vault-sync-guide-sub {
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	line-height: 1.45;
+	margin-bottom: 0.5em;
+}
+
+.vault-sync-guide-meta {
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	margin-top: 0.35em;
+}
+
+.vault-sync-guide-actions {
+	margin-top: 0.5em;
+}
+
+.vault-sync-sync-status-section {
+	padding: 0.75em 1em;
+	border-radius: var(--radius-m);
+	border: 1px solid var(--background-modifier-border);
+}
+
+.vault-sync-status-line {
+	font-size: var(--font-ui-medium);
+	font-weight: 500;
+	margin-bottom: 0.25em;
+}
+
+.vault-sync-binding-card {
+	margin-top: 0.75em;
+	padding: 1em 1em 0.75em;
+	border-radius: var(--radius-m);
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary-alt);
+}
+
+.vault-sync-credential-notice {
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	line-height: 1.5;
+	margin-bottom: 0.65em;
+}
+
 .vault-sync-binding-panel {
 	margin-top: 0.5em;
 }
@@ -14,6 +86,10 @@
 	color: var(--text-success);
 }
 
+.vault-sync-binding-reveal-hint {
+	color: var(--text-muted);
+}
+
 .vault-sync-binding-code-row {
 	display: flex;
 	flex-wrap: wrap;
@@ -22,9 +98,32 @@
 	margin-top: 0.35em;
 }
 
+.vault-sync-binding-code-label {
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	margin-right: 0.25em;
+}
+
+.vault-sync-binding-masked-wrap {
+	margin-top: 0.5em;
+}
+
 .vault-sync-binding-code {
 	font-family: var(--font-monospace-theme), var(--font-monospace), ui-monospace, monospace;
 	letter-spacing: 0.07em;
+	word-break: break-all;
+}
+
+.vault-sync-binding-code-masked {
+	font-size: 1.35em;
+	font-weight: 600;
+	margin-top: 0.25em;
+	line-height: 1.35;
+}
+
+.vault-sync-binding-code-full {
+	font-size: 1.2em;
+	font-weight: 600;
 }
 
 .vault-sync-binding-copy-btn {
@@ -53,13 +152,62 @@
 
 .vault-sync-device-table th,
 .vault-sync-device-table td {
-	padding: 0.35em 0.5em;
+	padding: 0.45em 0.5em;
 	border-bottom: 1px solid var(--background-modifier-border);
 	text-align: left;
 	vertical-align: top;
 }
 
+.vault-sync-device-row-current {
+	background: var(--background-modifier-hover);
+}
+
+.vault-sync-badge-current {
+	display: inline-block;
+	margin-left: 0.35em;
+	padding: 0.1em 0.45em;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	color: var(--text-accent);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	vertical-align: middle;
+}
+
 .vault-sync-tag-current {
 	color: var(--text-accent);
+	font-size: var(--font-ui-smaller);
+}
+
+.vault-sync-advanced {
+	margin-top: 1.25em;
+	padding: 0.5em 0;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.vault-sync-advanced > summary {
+	cursor: pointer;
+	font-weight: 600;
+	font-size: var(--font-ui-medium);
+	padding: 0.35em 0;
+	list-style: none;
+}
+
+.vault-sync-advanced > summary::-webkit-details-marker {
+	display: none;
+}
+
+.vault-sync-advanced-body {
+	padding-top: 0.5em;
+}
+
+.vault-sync-debug-block {
+	margin-top: 0.75em;
+	padding-top: 0.75em;
+	border-top: 1px dashed var(--background-modifier-border);
+}
+
+.vault-sync-debug-identity .setting-item-description {
+	font-family: var(--font-monospace-theme), var(--font-monospace), ui-monospace, monospace;
 	font-size: var(--font-ui-smaller);
 }
