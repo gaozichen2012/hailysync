@@ -49,6 +49,8 @@ const SYNC_CRYPTO_FILENAME = '.sync_crypto.json';
 interface SyncIdentityConfig {
   user_id?: string;
   device_id?: string;
+  /** 仅 vault 根目录 .sync_config，用于丢失 .sync_crypto.json 时自动 GET envelope + 解封（用户可自行删除该字段） */
+  binding_code?: string;
   /** 设备被服务端移除后需通过绑定码重连，禁止自动 init */
   pending_bind?: boolean;
   /** 仅当 pending_bind 时用于 UI 区分「被删除」与其它待绑定 */
@@ -1339,29 +1341,89 @@ export default class ObsidianSyncPlugin extends Plugin {
     return res.data;
   }
 
-  async ensureVaultKeyLoaded(): Promise<void> {
+  /** 404 → null；其余错误原样抛出（含 DEVICE_REVOKED） */
+  private async fetchVaultEnvelopeOrNotFound(): Promise<VaultEnvelopeJson | null> {
+    try {
+      return await this.fetchVaultEnvelope();
+    } catch (e) {
+      if (isDeviceRevokedError(e)) throw e;
+      if (isAxiosError(e) && e.response?.status === 404) return null;
+      throw e;
+    }
+  }
+
+  private async readBindingCodeFromConfigFile(): Promise<string | null> {
+    try {
+      const raw = await this.app.vault.adapter.read(SYNC_CONFIG_FILENAME);
+      const p = JSON.parse(raw || '{}') as unknown;
+      if (!isPlainObjectRecord(p)) return null;
+      const c = p.binding_code;
+      if (typeof c === 'string' && c.trim()) return c.trim();
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
+  /** 同步/上传/下载前：内存或 .sync_crypto → 必要时 GET envelope + 绑定码恢复，或 404 时用绑定码首包 PUT */
+  async ensureVaultCryptoForSync(): Promise<void> {
     if (this.vaultKey != null && this.vaultKey.length === 32) return;
+
     let raw: string;
     try {
       raw = await this.app.vault.adapter.read(SYNC_CRYPTO_FILENAME);
-    } catch {
-      throw new Error('E2EE_VAULT_KEY_MISSING');
+      let p: unknown;
+      try {
+        p = JSON.parse(raw || '{}') as unknown;
+      } catch {
+        throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+      }
+      if (!isPlainObjectRecord(p)) throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+      const kb = p.vault_key_b64u;
+      const vv = p.vault_key_version;
+      if (typeof kb !== 'string' || typeof vv !== 'number' || !Number.isFinite(vv)) {
+        throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+      }
+      this.vaultKey = base64urlToBytes(kb);
+      this.vaultKeyVersion = vv;
+      if (this.vaultKey.length !== 32) throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+      return;
+    } catch (e) {
+      if (e instanceof Error && e.message === 'E2EE_CRYPTO_FILE_CORRUPT') throw e;
+      /* 无文件或其它读盘错误 → 走恢复 */
     }
-    let p: unknown;
+
+    if (!this.deviceId) {
+      throw new Error('E2EE_NEED_DEVICE');
+    }
+
+    const bindingFromDisk = await this.readBindingCodeFromConfigFile();
+
+    let envelope: VaultEnvelopeJson | null;
     try {
-      p = JSON.parse(raw || '{}') as unknown;
-    } catch {
-      throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+      envelope = await this.fetchVaultEnvelopeOrNotFound();
+    } catch (e) {
+      if (isDeviceRevokedError(e)) await this.handleDeviceRevoked();
+      throw e;
     }
-    if (!isPlainObjectRecord(p)) throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
-    const kb = p.vault_key_b64u;
-    const vv = p.vault_key_version;
-    if (typeof kb !== 'string' || typeof vv !== 'number' || !Number.isFinite(vv)) {
-      throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+    if (envelope !== null) {
+      if (!bindingFromDisk) {
+        throw new Error('E2EE_NEED_BINDING_CODE');
+      }
+      await this.unlockVaultFromBindingCode(bindingFromDisk, envelope);
+      return;
     }
-    this.vaultKey = base64urlToBytes(kb);
-    this.vaultKeyVersion = vv;
-    if (this.vaultKey.length !== 32) throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+
+    if (bindingFromDisk) {
+      await this.bootstrapVaultFromInit(bindingFromDisk);
+      return;
+    }
+
+    throw new Error('E2EE_NEED_FIRST_SETUP');
+  }
+
+  async ensureVaultKeyLoaded(): Promise<void> {
+    await this.ensureVaultCryptoForSync();
   }
 
   /** pending_bind 时仅待绑定；否则读盘或 POST /api/init */
@@ -1445,8 +1507,8 @@ export default class ObsidianSyncPlugin extends Plugin {
         new Notice('初始化失败：服务端未返回 binding_code');
         return;
       }
-      await this.persistFullIdentity(uid.trim(), did.trim());
       try {
+        await this.persistFullIdentity(uid.trim(), did.trim(), bindingCode.trim());
         await this.bootstrapVaultFromInit(bindingCode);
       } catch (e) {
         await this.wipeVaultKeyLocal();
@@ -1473,19 +1535,42 @@ export default class ObsidianSyncPlugin extends Plugin {
     }
   }
 
-  private async persistFullIdentity(userId: string, deviceId: string): Promise<void> {
+  /**
+   * @param bindingCodeToStore 非空则写入/覆盖 config 内 binding_code；省略则保留盘中已有 binding_code
+   */
+  private async persistFullIdentity(
+    userId: string,
+    deviceId: string,
+    bindingCodeToStore?: string,
+  ): Promise<void> {
+    let existingBinding: string | undefined;
+    try {
+      const raw = await this.app.vault.adapter.read(SYNC_CONFIG_FILENAME);
+      const p = JSON.parse(raw || '{}') as unknown;
+      if (isPlainObjectRecord(p) && typeof p.binding_code === 'string' && p.binding_code.trim()) {
+        existingBinding = p.binding_code.trim();
+      }
+    } catch {
+      /* ignore */
+    }
+
+    const storeBinding =
+      bindingCodeToStore !== undefined && bindingCodeToStore.trim() !== ''
+        ? bindingCodeToStore.trim()
+        : existingBinding;
+
     this.userId = userId.trim();
     this.deviceId = deviceId.trim();
     this.connectionState = 'connected';
     this.wasRevoked = false;
-    await this.app.vault.adapter.write(
-      SYNC_CONFIG_FILENAME,
-      JSON.stringify(
-        { user_id: this.userId, device_id: this.deviceId } satisfies SyncIdentityConfig,
-        null,
-        2,
-      ),
-    );
+
+    const out: SyncIdentityConfig = {
+      user_id: this.userId,
+      device_id: this.deviceId,
+    };
+    if (storeBinding) out.binding_code = storeBinding;
+
+    await this.app.vault.adapter.write(SYNC_CONFIG_FILENAME, JSON.stringify(out, null, 2));
   }
 
   async handleDeviceRevoked(): Promise<void> {
@@ -1655,7 +1740,7 @@ export default class ObsidianSyncPlugin extends Plugin {
         await this.wipeVaultKeyLocal();
         return false;
       }
-      await this.persistFullIdentity(uid.trim(), did.trim());
+      await this.persistFullIdentity(uid.trim(), did.trim(), code.trim());
       new Notice('设备绑定成功，正在开始同步');
       void this.syncNow();
       return true;
@@ -2004,11 +2089,31 @@ export default class ObsidianSyncPlugin extends Plugin {
       }
 
       try {
-        await this.ensureVaultKeyLoaded();
+        await this.ensureVaultCryptoForSync();
       } catch (e) {
+        if (isDeviceRevokedError(e)) {
+          await this.handleDeviceRevoked();
+          this.lastSyncError = '当前设备已被移除，无法继续同步';
+          this.setSyncStatusFailed();
+          new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+          if (isAuto) console.log('[auto-sync] failed');
+          return;
+        }
         this.lastSyncError = formatSyncError(e);
         this.setSyncStatusFailed();
-        new Notice('无法加载 vault 密钥（需完成 init/bind）：' + formatSyncError(e), 12000);
+        if (e instanceof Error && e.message === 'E2EE_NEED_BINDING_CODE') {
+          new Notice(
+            '本地缺少加密密钥。请在设置「绑定新设备」中输入绑定码以恢复（需与该 vault 所用绑定码一致）。',
+            15000,
+          );
+        } else if (e instanceof Error && e.message === 'E2EE_NEED_FIRST_SETUP') {
+          new Notice(
+            '无法自动恢复加密：缺少绑定码备份。请使用「绑定新设备」输入绑定码，或删除 .sync_config.json 后重试以重新初始化。',
+            15000,
+          );
+        } else {
+          new Notice('加密密钥不可用：' + formatSyncError(e), 12000);
+        }
         if (isAuto) console.log('[auto-sync] failed');
         return;
       }

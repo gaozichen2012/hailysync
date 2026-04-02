@@ -18522,29 +18522,78 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     assertEnvelopeShape(res.data);
     return res.data;
   }
-  async ensureVaultKeyLoaded() {
+  /** 404 → null；其余错误原样抛出（含 DEVICE_REVOKED） */
+  async fetchVaultEnvelopeOrNotFound() {
+    try {
+      return await this.fetchVaultEnvelope();
+    } catch (e) {
+      if (isDeviceRevokedError(e)) throw e;
+      if (isAxiosError2(e) && e.response?.status === 404) return null;
+      throw e;
+    }
+  }
+  async readBindingCodeFromConfigFile() {
+    try {
+      const raw = await this.app.vault.adapter.read(SYNC_CONFIG_FILENAME);
+      const p = JSON.parse(raw || "{}");
+      if (!isPlainObjectRecord(p)) return null;
+      const c = p.binding_code;
+      if (typeof c === "string" && c.trim()) return c.trim();
+    } catch {
+    }
+    return null;
+  }
+  /** 同步/上传/下载前：内存或 .sync_crypto → 必要时 GET envelope + 绑定码恢复，或 404 时用绑定码首包 PUT */
+  async ensureVaultCryptoForSync() {
     if (this.vaultKey != null && this.vaultKey.length === 32) return;
     let raw;
     try {
       raw = await this.app.vault.adapter.read(SYNC_CRYPTO_FILENAME);
-    } catch {
-      throw new Error("E2EE_VAULT_KEY_MISSING");
+      let p;
+      try {
+        p = JSON.parse(raw || "{}");
+      } catch {
+        throw new Error("E2EE_CRYPTO_FILE_CORRUPT");
+      }
+      if (!isPlainObjectRecord(p)) throw new Error("E2EE_CRYPTO_FILE_CORRUPT");
+      const kb = p.vault_key_b64u;
+      const vv = p.vault_key_version;
+      if (typeof kb !== "string" || typeof vv !== "number" || !Number.isFinite(vv)) {
+        throw new Error("E2EE_CRYPTO_FILE_CORRUPT");
+      }
+      this.vaultKey = base64urlToBytes(kb);
+      this.vaultKeyVersion = vv;
+      if (this.vaultKey.length !== 32) throw new Error("E2EE_CRYPTO_FILE_CORRUPT");
+      return;
+    } catch (e) {
+      if (e instanceof Error && e.message === "E2EE_CRYPTO_FILE_CORRUPT") throw e;
     }
-    let p;
+    if (!this.deviceId) {
+      throw new Error("E2EE_NEED_DEVICE");
+    }
+    const bindingFromDisk = await this.readBindingCodeFromConfigFile();
+    let envelope;
     try {
-      p = JSON.parse(raw || "{}");
-    } catch {
-      throw new Error("E2EE_CRYPTO_FILE_CORRUPT");
+      envelope = await this.fetchVaultEnvelopeOrNotFound();
+    } catch (e) {
+      if (isDeviceRevokedError(e)) await this.handleDeviceRevoked();
+      throw e;
     }
-    if (!isPlainObjectRecord(p)) throw new Error("E2EE_CRYPTO_FILE_CORRUPT");
-    const kb = p.vault_key_b64u;
-    const vv = p.vault_key_version;
-    if (typeof kb !== "string" || typeof vv !== "number" || !Number.isFinite(vv)) {
-      throw new Error("E2EE_CRYPTO_FILE_CORRUPT");
+    if (envelope !== null) {
+      if (!bindingFromDisk) {
+        throw new Error("E2EE_NEED_BINDING_CODE");
+      }
+      await this.unlockVaultFromBindingCode(bindingFromDisk, envelope);
+      return;
     }
-    this.vaultKey = base64urlToBytes(kb);
-    this.vaultKeyVersion = vv;
-    if (this.vaultKey.length !== 32) throw new Error("E2EE_CRYPTO_FILE_CORRUPT");
+    if (bindingFromDisk) {
+      await this.bootstrapVaultFromInit(bindingFromDisk);
+      return;
+    }
+    throw new Error("E2EE_NEED_FIRST_SETUP");
+  }
+  async ensureVaultKeyLoaded() {
+    await this.ensureVaultCryptoForSync();
   }
   /** pending_bind 时仅待绑定；否则读盘或 POST /api/init */
   async ensureDeviceIdentity() {
@@ -18608,8 +18657,8 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         new import_obsidian.Notice("\u521D\u59CB\u5316\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE binding_code");
         return;
       }
-      await this.persistFullIdentity(uid.trim(), did.trim());
       try {
+        await this.persistFullIdentity(uid.trim(), did.trim(), bindingCode.trim());
         await this.bootstrapVaultFromInit(bindingCode);
       } catch (e) {
         await this.wipeVaultKeyLocal();
@@ -18635,19 +18684,30 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       }
     }
   }
-  async persistFullIdentity(userId, deviceId) {
+  /**
+   * @param bindingCodeToStore 非空则写入/覆盖 config 内 binding_code；省略则保留盘中已有 binding_code
+   */
+  async persistFullIdentity(userId, deviceId, bindingCodeToStore) {
+    let existingBinding;
+    try {
+      const raw = await this.app.vault.adapter.read(SYNC_CONFIG_FILENAME);
+      const p = JSON.parse(raw || "{}");
+      if (isPlainObjectRecord(p) && typeof p.binding_code === "string" && p.binding_code.trim()) {
+        existingBinding = p.binding_code.trim();
+      }
+    } catch {
+    }
+    const storeBinding = bindingCodeToStore !== void 0 && bindingCodeToStore.trim() !== "" ? bindingCodeToStore.trim() : existingBinding;
     this.userId = userId.trim();
     this.deviceId = deviceId.trim();
     this.connectionState = "connected";
     this.wasRevoked = false;
-    await this.app.vault.adapter.write(
-      SYNC_CONFIG_FILENAME,
-      JSON.stringify(
-        { user_id: this.userId, device_id: this.deviceId },
-        null,
-        2
-      )
-    );
+    const out = {
+      user_id: this.userId,
+      device_id: this.deviceId
+    };
+    if (storeBinding) out.binding_code = storeBinding;
+    await this.app.vault.adapter.write(SYNC_CONFIG_FILENAME, JSON.stringify(out, null, 2));
   }
   async handleDeviceRevoked() {
     await this.wipeVaultKeyLocal();
@@ -18796,7 +18856,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         await this.wipeVaultKeyLocal();
         return false;
       }
-      await this.persistFullIdentity(uid.trim(), did.trim());
+      await this.persistFullIdentity(uid.trim(), did.trim(), code.trim());
       new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u6210\u529F\uFF0C\u6B63\u5728\u5F00\u59CB\u540C\u6B65");
       void this.syncNow();
       return true;
@@ -19079,11 +19139,31 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         return;
       }
       try {
-        await this.ensureVaultKeyLoaded();
+        await this.ensureVaultCryptoForSync();
       } catch (e) {
+        if (isDeviceRevokedError(e)) {
+          await this.handleDeviceRevoked();
+          this.lastSyncError = "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65";
+          this.setSyncStatusFailed();
+          new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+          if (isAuto) console.log("[auto-sync] failed");
+          return;
+        }
         this.lastSyncError = formatSyncError(e);
         this.setSyncStatusFailed();
-        new import_obsidian.Notice("\u65E0\u6CD5\u52A0\u8F7D vault \u5BC6\u94A5\uFF08\u9700\u5B8C\u6210 init/bind\uFF09\uFF1A" + formatSyncError(e), 12e3);
+        if (e instanceof Error && e.message === "E2EE_NEED_BINDING_CODE") {
+          new import_obsidian.Notice(
+            "\u672C\u5730\u7F3A\u5C11\u52A0\u5BC6\u5BC6\u94A5\u3002\u8BF7\u5728\u8BBE\u7F6E\u300C\u7ED1\u5B9A\u65B0\u8BBE\u5907\u300D\u4E2D\u8F93\u5165\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\uFF08\u9700\u4E0E\u8BE5 vault \u6240\u7528\u7ED1\u5B9A\u7801\u4E00\u81F4\uFF09\u3002",
+            15e3
+          );
+        } else if (e instanceof Error && e.message === "E2EE_NEED_FIRST_SETUP") {
+          new import_obsidian.Notice(
+            "\u65E0\u6CD5\u81EA\u52A8\u6062\u590D\u52A0\u5BC6\uFF1A\u7F3A\u5C11\u7ED1\u5B9A\u7801\u5907\u4EFD\u3002\u8BF7\u4F7F\u7528\u300C\u7ED1\u5B9A\u65B0\u8BBE\u5907\u300D\u8F93\u5165\u7ED1\u5B9A\u7801\uFF0C\u6216\u5220\u9664 .sync_config.json \u540E\u91CD\u8BD5\u4EE5\u91CD\u65B0\u521D\u59CB\u5316\u3002",
+            15e3
+          );
+        } else {
+          new import_obsidian.Notice("\u52A0\u5BC6\u5BC6\u94A5\u4E0D\u53EF\u7528\uFF1A" + formatSyncError(e), 12e3);
+        }
         if (isAuto) console.log("[auto-sync] failed");
         return;
       }
