@@ -60,7 +60,12 @@ async function ensureVaultFoldersForPath(vault: Vault, filePath: string): Promis
 }
 
 function normalizeVaultPath(p: string): string {
-  return p.replace(/\\/g, '/');
+  if (!p) return p;
+  const s = p.replace(/\\/g, '/');
+  return s
+    .split('/')
+    .filter((seg) => seg !== '' && seg !== '.')
+    .join('/');
 }
 
 /** 不参与同步的路径（隐藏项、配置目录、同步元数据） */
@@ -391,8 +396,58 @@ function formatDeviceLastActive(ts: number): string {
   return formatRelativeTimeShort(ts);
 }
 
+/** 常见上传接口英文短语 → 中文（用于 /upload 等返回体） */
+function humanizeKnownUploadErrorText(raw: string): string {
+  const t = raw.trim();
+  const l = t.toLowerCase();
+  if (l.includes('file required')) {
+    return '上传失败：缺少文件（表单字段 file 必填）';
+  }
+  if (l.includes('path required')) {
+    return '上传失败：缺少路径（表单字段 path 必填）';
+  }
+  if (l.includes('invalid upload')) {
+    return '上传失败：无效的上传（请检查文件与 path、hash、updated_at 等字段）';
+  }
+  return t;
+}
+
+/** Content-Type 为 JSON 且体为「仅含下载链接」时拒绝写入，避免把 URL 当正文 */
+function assertDownloadBodyIsRawFileContent(
+  data: string,
+  contentType: string | undefined,
+): void {
+  const ct = (contentType ?? '').toLowerCase();
+  if (!ct.includes('application/json')) return;
+  const s = data.trim();
+  if (!s.startsWith('{')) return;
+  try {
+    const parsed = JSON.parse(s) as unknown;
+    if (!isPlainObjectRecord(parsed)) return;
+    const urlKeys = ['url', 'downloadUrl', 'signedUrl', 'download_url', 'fileUrl'] as const;
+    for (const k of urlKeys) {
+      const v = parsed[k];
+      if (typeof v === 'string' && /^https?:\/\//i.test(v.trim())) {
+        throw new Error(
+          '服务端返回了 JSON 链接而非文件流，请确认 /download 仍直接输出文件内容',
+        );
+      }
+    }
+  } catch (e) {
+    if (e instanceof Error && e.message.includes('服务端返回了 JSON 链接')) throw e;
+  }
+}
+
+const AXIOS_LARGE_FILE_DEFAULTS = {
+  maxBodyLength: Infinity as number,
+  maxContentLength: Infinity as number,
+};
+
 function formatSyncError(err: unknown): string {
   if (isAxiosError(err)) {
+    if (err.response?.status === 413) {
+      return '文件过大，已超过服务端允许的大小限制';
+    }
     const data = err.response?.data;
     if (typeof data === 'string' && data.trim()) {
       const s = data.trim();
@@ -400,20 +455,24 @@ function formatSyncError(err: unknown): string {
         const parsed = JSON.parse(s) as unknown;
         if (isPlainObjectRecord(parsed)) {
           const msg = parsed.message;
-          if (typeof msg === 'string' && msg.trim()) return msg.trim();
+          if (typeof msg === 'string' && msg.trim())
+            return humanizeKnownUploadErrorText(msg.trim());
           const errMsg = parsed.error;
-          if (typeof errMsg === 'string' && errMsg.trim()) return errMsg.trim();
+          if (typeof errMsg === 'string' && errMsg.trim())
+            return humanizeKnownUploadErrorText(errMsg.trim());
         }
       } catch {
         /* 非 JSON 字符串 */
       }
-      if (s.length <= 200) return s;
+      if (s.length <= 200) return humanizeKnownUploadErrorText(s);
     }
     if (isPlainObjectRecord(data as unknown)) {
       const msg = (data as { message?: unknown }).message;
-      if (typeof msg === 'string' && msg.trim()) return msg.trim();
+      if (typeof msg === 'string' && msg.trim())
+        return humanizeKnownUploadErrorText(msg.trim());
       const errMsg = (data as { error?: unknown }).error;
-      if (typeof errMsg === 'string' && errMsg.trim()) return errMsg.trim();
+      if (typeof errMsg === 'string' && errMsg.trim())
+        return humanizeKnownUploadErrorText(errMsg.trim());
     }
     const parts: string[] = [];
     if (err.code) parts.push(err.code);
@@ -1461,7 +1520,12 @@ export default class ObsidianSyncPlugin extends Plugin {
       const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
       const parsed = JSON.parse(content || '{}') as unknown;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as SyncMetaMap;
+        const raw = parsed as SyncMetaMap;
+        const out: SyncMetaMap = {};
+        for (const [k, v] of Object.entries(raw)) {
+          out[normalizeVaultPath(k)] = v;
+        }
+        return out;
       }
     } catch {
       /* 首次或损坏 */
@@ -1528,22 +1592,32 @@ export default class ObsidianSyncPlugin extends Plugin {
   async uploadFile(filePath: string, meta: SyncMetaMap): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
     try {
+      if (!this.deviceId) {
+        throw new Error('缺少设备 ID，无法上传（需要 x-device-id）');
+      }
       const content = await this.app.vault.adapter.read(normalized);
       const hash = md5(content || '');
 
       console.log('upload:', normalized, (content || '').length, hash);
 
       const updated_at = Date.now();
-      await axios.post(
-        this.baseUrl + '/upload',
-        {
-          path: normalized,
-          content: content || '',
-          hash,
-          updated_at,
-        },
-        { headers: this.deviceHeaders() },
+      const form = new FormData();
+      const basename = normalized.includes('/')
+        ? normalized.slice(normalized.lastIndexOf('/') + 1)
+        : normalized;
+      form.append(
+        'file',
+        new Blob([content || ''], { type: 'application/octet-stream' }),
+        basename || 'file',
       );
+      form.append('path', normalized);
+      form.append('hash', hash);
+      form.append('updated_at', String(updated_at));
+
+      await axios.post(this.baseUrl + '/upload', form, {
+        headers: this.deviceHeaders(),
+        ...AXIOS_LARGE_FILE_DEFAULTS,
+      });
 
       meta[normalized] = {
         hash,
@@ -1563,9 +1637,14 @@ export default class ObsidianSyncPlugin extends Plugin {
         params: { path: normalized },
         headers: this.deviceHeaders(),
         responseType: 'text',
+        ...AXIOS_LARGE_FILE_DEFAULTS,
       });
 
       const content = res.data || '';
+      assertDownloadBodyIsRawFileContent(
+        typeof content === 'string' ? content : String(content),
+        res.headers['content-type'],
+      );
 
       const exists = this.app.vault.getAbstractFileByPath(normalized);
 
@@ -1598,8 +1677,13 @@ export default class ObsidianSyncPlugin extends Plugin {
       params: { path: normalized },
       headers: this.deviceHeaders(),
       responseType: 'text',
+      ...AXIOS_LARGE_FILE_DEFAULTS,
     });
     const content = res.data || '';
+    assertDownloadBodyIsRawFileContent(
+      typeof content === 'string' ? content : String(content),
+      res.headers['content-type'],
+    );
     const withoutMd = normalized.replace(/\.md$/i, '');
     const conflictPath = `${withoutMd}.conflict.md`;
     await ensureVaultFoldersForPath(this.app.vault, conflictPath);

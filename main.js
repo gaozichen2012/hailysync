@@ -14899,7 +14899,9 @@ async function ensureVaultFoldersForPath(vault, filePath) {
   }
 }
 function normalizeVaultPath(p) {
-  return p.replace(/\\/g, "/");
+  if (!p) return p;
+  const s = p.replace(/\\/g, "/");
+  return s.split("/").filter((seg) => seg !== "" && seg !== ".").join("/");
 }
 function shouldSync(filePath) {
   if (!filePath) return false;
@@ -15155,8 +15157,50 @@ function formatRelativeTimeShort(ts) {
 function formatDeviceLastActive(ts) {
   return formatRelativeTimeShort(ts);
 }
+function humanizeKnownUploadErrorText(raw) {
+  const t = raw.trim();
+  const l = t.toLowerCase();
+  if (l.includes("file required")) {
+    return "\u4E0A\u4F20\u5931\u8D25\uFF1A\u7F3A\u5C11\u6587\u4EF6\uFF08\u8868\u5355\u5B57\u6BB5 file \u5FC5\u586B\uFF09";
+  }
+  if (l.includes("path required")) {
+    return "\u4E0A\u4F20\u5931\u8D25\uFF1A\u7F3A\u5C11\u8DEF\u5F84\uFF08\u8868\u5355\u5B57\u6BB5 path \u5FC5\u586B\uFF09";
+  }
+  if (l.includes("invalid upload")) {
+    return "\u4E0A\u4F20\u5931\u8D25\uFF1A\u65E0\u6548\u7684\u4E0A\u4F20\uFF08\u8BF7\u68C0\u67E5\u6587\u4EF6\u4E0E path\u3001hash\u3001updated_at \u7B49\u5B57\u6BB5\uFF09";
+  }
+  return t;
+}
+function assertDownloadBodyIsRawFileContent(data, contentType) {
+  const ct = (contentType ?? "").toLowerCase();
+  if (!ct.includes("application/json")) return;
+  const s = data.trim();
+  if (!s.startsWith("{")) return;
+  try {
+    const parsed = JSON.parse(s);
+    if (!isPlainObjectRecord(parsed)) return;
+    const urlKeys = ["url", "downloadUrl", "signedUrl", "download_url", "fileUrl"];
+    for (const k of urlKeys) {
+      const v = parsed[k];
+      if (typeof v === "string" && /^https?:\/\//i.test(v.trim())) {
+        throw new Error(
+          "\u670D\u52A1\u7AEF\u8FD4\u56DE\u4E86 JSON \u94FE\u63A5\u800C\u975E\u6587\u4EF6\u6D41\uFF0C\u8BF7\u786E\u8BA4 /download \u4ECD\u76F4\u63A5\u8F93\u51FA\u6587\u4EF6\u5185\u5BB9"
+        );
+      }
+    }
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("\u670D\u52A1\u7AEF\u8FD4\u56DE\u4E86 JSON \u94FE\u63A5")) throw e;
+  }
+}
+var AXIOS_LARGE_FILE_DEFAULTS = {
+  maxBodyLength: Infinity,
+  maxContentLength: Infinity
+};
 function formatSyncError(err) {
   if (isAxiosError2(err)) {
+    if (err.response?.status === 413) {
+      return "\u6587\u4EF6\u8FC7\u5927\uFF0C\u5DF2\u8D85\u8FC7\u670D\u52A1\u7AEF\u5141\u8BB8\u7684\u5927\u5C0F\u9650\u5236";
+    }
     const data = err.response?.data;
     if (typeof data === "string" && data.trim()) {
       const s = data.trim();
@@ -15164,19 +15208,23 @@ function formatSyncError(err) {
         const parsed = JSON.parse(s);
         if (isPlainObjectRecord(parsed)) {
           const msg = parsed.message;
-          if (typeof msg === "string" && msg.trim()) return msg.trim();
+          if (typeof msg === "string" && msg.trim())
+            return humanizeKnownUploadErrorText(msg.trim());
           const errMsg = parsed.error;
-          if (typeof errMsg === "string" && errMsg.trim()) return errMsg.trim();
+          if (typeof errMsg === "string" && errMsg.trim())
+            return humanizeKnownUploadErrorText(errMsg.trim());
         }
       } catch {
       }
-      if (s.length <= 200) return s;
+      if (s.length <= 200) return humanizeKnownUploadErrorText(s);
     }
     if (isPlainObjectRecord(data)) {
       const msg = data.message;
-      if (typeof msg === "string" && msg.trim()) return msg.trim();
+      if (typeof msg === "string" && msg.trim())
+        return humanizeKnownUploadErrorText(msg.trim());
       const errMsg = data.error;
-      if (typeof errMsg === "string" && errMsg.trim()) return errMsg.trim();
+      if (typeof errMsg === "string" && errMsg.trim())
+        return humanizeKnownUploadErrorText(errMsg.trim());
     }
     const parts = [];
     if (err.code) parts.push(err.code);
@@ -16076,7 +16124,12 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
       const parsed = JSON.parse(content || "{}");
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed;
+        const raw = parsed;
+        const out = {};
+        for (const [k, v] of Object.entries(raw)) {
+          out[normalizeVaultPath(k)] = v;
+        }
+        return out;
       }
     } catch {
     }
@@ -16129,20 +16182,27 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   async uploadFile(filePath, meta) {
     const normalized = normalizeVaultPath(filePath);
     try {
+      if (!this.deviceId) {
+        throw new Error("\u7F3A\u5C11\u8BBE\u5907 ID\uFF0C\u65E0\u6CD5\u4E0A\u4F20\uFF08\u9700\u8981 x-device-id\uFF09");
+      }
       const content = await this.app.vault.adapter.read(normalized);
       const hash = (0, import_blueimp_md5.default)(content || "");
       console.log("upload:", normalized, (content || "").length, hash);
       const updated_at = Date.now();
-      await axios_default.post(
-        this.baseUrl + "/upload",
-        {
-          path: normalized,
-          content: content || "",
-          hash,
-          updated_at
-        },
-        { headers: this.deviceHeaders() }
+      const form = new FormData();
+      const basename = normalized.includes("/") ? normalized.slice(normalized.lastIndexOf("/") + 1) : normalized;
+      form.append(
+        "file",
+        new Blob([content || ""], { type: "application/octet-stream" }),
+        basename || "file"
       );
+      form.append("path", normalized);
+      form.append("hash", hash);
+      form.append("updated_at", String(updated_at));
+      await axios_default.post(this.baseUrl + "/upload", form, {
+        headers: this.deviceHeaders(),
+        ...AXIOS_LARGE_FILE_DEFAULTS
+      });
       meta[normalized] = {
         hash,
         updated_at,
@@ -16159,9 +16219,14 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       const res = await axios_default.get(this.baseUrl + "/download", {
         params: { path: normalized },
         headers: this.deviceHeaders(),
-        responseType: "text"
+        responseType: "text",
+        ...AXIOS_LARGE_FILE_DEFAULTS
       });
       const content = res.data || "";
+      assertDownloadBodyIsRawFileContent(
+        typeof content === "string" ? content : String(content),
+        res.headers["content-type"]
+      );
       const exists = this.app.vault.getAbstractFileByPath(normalized);
       if (exists) {
         await this.app.vault.adapter.write(normalized, content);
@@ -16188,9 +16253,14 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     const res = await axios_default.get(this.baseUrl + "/download", {
       params: { path: normalized },
       headers: this.deviceHeaders(),
-      responseType: "text"
+      responseType: "text",
+      ...AXIOS_LARGE_FILE_DEFAULTS
     });
     const content = res.data || "";
+    assertDownloadBodyIsRawFileContent(
+      typeof content === "string" ? content : String(content),
+      res.headers["content-type"]
+    );
     const withoutMd = normalized.replace(/\.md$/i, "");
     const conflictPath = `${withoutMd}.conflict.md`;
     await ensureVaultFoldersForPath(this.app.vault, conflictPath);
