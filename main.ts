@@ -10,12 +10,32 @@ import type { Vault } from 'obsidian';
 import axios, { isAxiosError } from 'axios';
 import md5 from 'blueimp-md5';
 import { hostname, platform } from 'os';
+import {
+  ENCRYPTION_VERSION_WIRE,
+  assertEnvelopeShape,
+  base64urlToBytes,
+  bytesToBase64url,
+  decryptWireToPlain,
+  deriveKek,
+  encryptPlainToWire,
+  normalizeBindingCode,
+  randomBytes,
+  sha256HexOfBytes,
+  unwrapVaultKeyFromEnvelope,
+  wrapVaultKeyToEnvelope,
+  type VaultEnvelopeJson,
+} from './crypto-e2ee';
 
-/** 与 sync-server /files 及本地 .sync_meta.json 一致 */
+/** 与 sync-server /files 及本地 .sync_meta.json 一致（E2EE） */
 interface SyncFileMeta {
-  hash: string;
+  cipher_hash: string | null;
+  cipher_size: number | null;
   updated_at: number;
   deleted?: boolean;
+  encryption_version: number;
+  vault_key_version: number;
+  /** 本地明文 MD5，仅用于冲突检测，不上报 */
+  plain_fingerprint: string;
 }
 
 type SyncMetaMap = Record<string, SyncFileMeta>;
@@ -23,6 +43,8 @@ type SyncMetaMap = Record<string, SyncFileMeta>;
 const SYNC_META_FILENAME = '.sync_meta.json';
 /** 本地身份配置（不参与笔记同步，避免经同步服务覆盖各端 user_id） */
 const SYNC_CONFIG_FILENAME = '.sync_config.json';
+/** 本地 vault 密钥缓存（不参与 vault 同步） */
+const SYNC_CRYPTO_FILENAME = '.sync_crypto.json';
 
 interface SyncIdentityConfig {
   user_id?: string;
@@ -31,6 +53,11 @@ interface SyncIdentityConfig {
   pending_bind?: boolean;
   /** 仅当 pending_bind 时用于 UI 区分「被删除」与其它待绑定 */
   was_revoked?: boolean;
+}
+
+interface SyncCryptoLocalFile {
+  vault_key_b64u: string;
+  vault_key_version: number;
 }
 
 /** 与设置页、同步状态一致 */
@@ -76,182 +103,92 @@ function shouldSync(filePath: string): boolean {
   if (p.includes('.obsidian')) return false;
   if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return false;
   if (p === SYNC_CONFIG_FILENAME || p.endsWith(`/${SYNC_CONFIG_FILENAME}`)) return false;
+  if (p === SYNC_CRYPTO_FILENAME || p.endsWith(`/${SYNC_CRYPTO_FILENAME}`)) return false;
   return true;
 }
-
-/**
- * 绝不能当作 vault 路径的键：API 包装字段 + 单文件 metadata 字段名
- * （避免把 { hash, updated_at } 误当成 path→meta 或把 meta 字段当文件名）
- */
-const REMOTE_MAP_KEY_DENYLIST = new Set([
-  'schemaVersion',
-  'version',
-  'files',
-  'data',
-  'success',
-  'code',
-  'message',
-  'list',
-  'items',
-  'records',
-  'result',
-  'payload',
-  'hash',
-  'updated_at',
-  'deleted',
-  'md5',
-  'etag',
-  'updatedAt',
-  'mtime',
-  'size',
-]);
-
-/** 仅含这些键的普通对象视为「一条文件的 metadata」，不是 path→meta 表 */
-const REMOTE_FILE_META_FIELD_KEYS = new Set([
-  'hash',
-  'updated_at',
-  'deleted',
-  'md5',
-  'etag',
-  'updatedAt',
-  'mtime',
-  'size',
-]);
 
 function isPlainObjectRecord(v: unknown): v is Record<string, unknown> {
   return v != null && typeof v === 'object' && !Array.isArray(v);
 }
 
-/** 常见 API 包装：{ data|result|payload: {...} } 或 body 为 JSON 字符串 */
-function peelRemoteFilesWrapperOnce(o: Record<string, unknown>): Record<string, unknown> {
-  const d = o.data ?? o.payload;
-  if (isPlainObjectRecord(d)) return d;
-  const r = o.result;
-  if (isPlainObjectRecord(r)) return r;
-  if (typeof o.body === 'string') {
-    const s = o.body.trim();
-    if (s) {
-      try {
-        const b = JSON.parse(s) as unknown;
-        if (isPlainObjectRecord(b)) return b;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return o;
-}
-
-function peelRemoteFilesWrapperDeep(o: Record<string, unknown>): Record<string, unknown> {
-  let cur = o;
-  for (let i = 0; i < 6; i++) {
-    const next = peelRemoteFilesWrapperOnce(cur);
-    if (next === cur) break;
-    cur = next;
-  }
-  return cur;
-}
-
-function isLikelySingleFileMetaRecord(o: Record<string, unknown>): boolean {
-  const keys = Object.keys(o);
-  if (keys.length === 0) return false;
-  return keys.every((k) => REMOTE_FILE_META_FIELD_KEYS.has(k));
-}
-
 /**
- * 展开 .files 仅当内层仍是「路径→meta」表。
- * 若 files 内已是 { hash, updated_at } 则禁止下钻，否则会误把 meta 字段当路径名。
+ * GET /files：冻结协议 { items: [...] }，deleted=true 时 cipher_hash/cipher_size 为 null。
  */
-function diveIntoFilesMap(obj: Record<string, unknown>): Record<string, unknown> {
-  let cur = obj;
-  for (let i = 0; i < 12; i++) {
-    const inner = cur.files;
-    if (!isPlainObjectRecord(inner)) break;
-    if (isLikelySingleFileMetaRecord(inner)) break;
-    cur = inner;
-  }
-  return cur;
-}
+function parseRemoteFilesItems(parsed: unknown): SyncMetaMap {
+  if (!isPlainObjectRecord(parsed)) throw new Error('/files 响应必须为 JSON 对象');
+  const items = parsed.items;
+  if (!Array.isArray(items)) throw new Error('/files 必须为 { items: array }');
 
-function normalizeRemoteMap(raw: SyncMetaMap): SyncMetaMap {
   const out: SyncMetaMap = {};
-  for (const [k, v] of Object.entries(raw)) {
-    if (REMOTE_MAP_KEY_DENYLIST.has(k)) continue;
-    const path = normalizeVaultPath(k);
+  for (let i = 0; i < items.length; i++) {
+    const rawItem = items[i];
+    if (!isPlainObjectRecord(rawItem)) {
+      throw new Error(`/files items[${i}] 必须为对象`);
+    }
+    const rp = rawItem.relative_path;
+    if (typeof rp !== 'string' || !rp.trim()) {
+      throw new Error('/files 某项缺少 relative_path');
+    }
+    const path = normalizeVaultPath(rp);
     if (!shouldSync(path)) continue;
 
-    if (v === null || v === undefined) continue;
-
-    if (typeof v === 'string' || typeof v === 'number') {
-      out[path] = {
-        hash: String(v),
-        updated_at: Date.now(),
-        deleted: false,
-      };
-      continue;
-    }
-
-    if (typeof v !== 'object' || Array.isArray(v)) continue;
-
-    const rec = v as unknown as Record<string, unknown>;
-    const hashRaw = rec.hash ?? rec.md5 ?? rec.etag;
-    const hash =
-      typeof hashRaw === 'string'
-        ? hashRaw
-        : hashRaw != null
-          ? String(hashRaw)
-          : '';
-    const updatedRaw = rec.updated_at ?? rec.updatedAt ?? rec.mtime;
+    const updatedRaw = rawItem.updated_at;
     const updated_at =
-      typeof updatedRaw === 'number'
+      typeof updatedRaw === 'number' && Number.isFinite(updatedRaw)
         ? updatedRaw
         : typeof updatedRaw === 'string' && updatedRaw.trim() !== ''
           ? Number(updatedRaw)
           : NaN;
-    out[path] = {
-      hash,
-      updated_at: Number.isFinite(updated_at) ? updated_at : Date.now(),
-      deleted: rec.deleted === true,
-    };
-  }
-  return out;
-}
-
-/**
- * /files 解析为 path→meta：先剥 API 包装，再展开 .files，最后去掉根级元数据键。
- * 不支持顶层数组。
- */
-function extractRemoteFilesMapPayload(parsed: unknown): SyncMetaMap {
-  if (!isPlainObjectRecord(parsed)) return {};
-
-  let cur = peelRemoteFilesWrapperDeep(parsed);
-
-  const filesVal = cur.files;
-  if (typeof filesVal === 'string') {
-    const s = filesVal.trim();
-    if (s) {
-      try {
-        const inner = JSON.parse(s) as unknown;
-        if (isPlainObjectRecord(inner)) cur = inner;
-      } catch {
-        /* ignore */
-      }
+    if (!Number.isFinite(updated_at)) {
+      throw new Error(`/files ${path} updated_at 无效`);
     }
-  }
 
-  cur = diveIntoFilesMap(cur);
+    const ev = rawItem.encryption_version;
+    const vv = rawItem.vault_key_version;
+    if (typeof ev !== 'number' || !Number.isFinite(ev)) {
+      throw new Error(`/files ${path} encryption_version 无效`);
+    }
+    if (typeof vv !== 'number' || !Number.isFinite(vv)) {
+      throw new Error(`/files ${path} vault_key_version 无效`);
+    }
 
-  if (isLikelySingleFileMetaRecord(cur)) {
-    console.error(
-      '/files 解析后为单条 metadata 对象（无路径键），期望 path→meta；请检查是否多剥了一层或 files 内误放 meta',
-    );
-    return {};
-  }
+    const deleted = rawItem.deleted === true;
+    if (deleted) {
+      if (rawItem.cipher_hash !== null) {
+        throw new Error(`/files ${path} deleted=true 时 cipher_hash 须为 null`);
+      }
+      if (rawItem.cipher_size !== null) {
+        throw new Error(`/files ${path} deleted=true 时 cipher_size 须为 null`);
+      }
+      out[path] = {
+        cipher_hash: null,
+        cipher_size: null,
+        updated_at,
+        deleted: true,
+        encryption_version: ev,
+        vault_key_version: vv,
+        plain_fingerprint: '',
+      };
+      continue;
+    }
 
-  const out: SyncMetaMap = {};
-  for (const [k, v] of Object.entries(cur)) {
-    if (REMOTE_MAP_KEY_DENYLIST.has(k)) continue;
-    out[k] = v as SyncFileMeta;
+    const ch = rawItem.cipher_hash;
+    const cs = rawItem.cipher_size;
+    if (typeof ch !== 'string' || !ch.trim()) {
+      throw new Error(`/files ${path} 缺少 cipher_hash`);
+    }
+    if (typeof cs !== 'number' || !Number.isFinite(cs)) {
+      throw new Error(`/files ${path} cipher_size 无效`);
+    }
+    out[path] = {
+      cipher_hash: ch.trim().toLowerCase(),
+      cipher_size: cs,
+      updated_at,
+      deleted: false,
+      encryption_version: ev,
+      vault_key_version: vv,
+      plain_fingerprint: '',
+    };
   }
   return out;
 }
@@ -403,38 +340,58 @@ function humanizeKnownUploadErrorText(raw: string): string {
   if (l.includes('file required')) {
     return '上传失败：缺少文件（表单字段 file 必填）';
   }
-  if (l.includes('path required')) {
-    return '上传失败：缺少路径（表单字段 path 必填）';
+  if (l.includes('path required') || l.includes('relative_path')) {
+    return '上传失败：缺少路径（表单字段 relative_path 必填）';
   }
   if (l.includes('invalid upload')) {
-    return '上传失败：无效的上传（请检查文件与 path、hash、updated_at 等字段）';
+    return '上传失败：无效的上传（请检查 file、relative_path、cipher_hash、updated_at 等字段）';
   }
   return t;
 }
 
-/** Content-Type 为 JSON 且体为「仅含下载链接」时拒绝写入，避免把 URL 当正文 */
-function assertDownloadBodyIsRawFileContent(
-  data: string,
+/** 拒绝把 JSON 下载链接或非标 body 当密文写入 vault */
+/** axios `arraybuffer` 在部分环境下可能为 Buffer / TypedArray，统一为独立 ArrayBuffer */
+function httpResponseBodyToArrayBuffer(data: unknown): ArrayBuffer {
+  if (data instanceof ArrayBuffer) return data;
+  if (ArrayBuffer.isView(data)) {
+    const v = data as ArrayBufferView;
+    return v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength);
+  }
+  throw new Error('下载响应 body 无法转为 ArrayBuffer');
+}
+
+function assertDownloadWireResponse(
+  data: ArrayBuffer,
   contentType: string | undefined,
 ): void {
+  const head = new Uint8Array(data.byteLength === 0 ? data : data.slice(0, Math.min(400, data.byteLength)));
   const ct = (contentType ?? '').toLowerCase();
-  if (!ct.includes('application/json')) return;
-  const s = data.trim();
-  if (!s.startsWith('{')) return;
-  try {
-    const parsed = JSON.parse(s) as unknown;
-    if (!isPlainObjectRecord(parsed)) return;
-    const urlKeys = ['url', 'downloadUrl', 'signedUrl', 'download_url', 'fileUrl'] as const;
-    for (const k of urlKeys) {
-      const v = parsed[k];
-      if (typeof v === 'string' && /^https?:\/\//i.test(v.trim())) {
-        throw new Error(
-          '服务端返回了 JSON 链接而非文件流，请确认 /download 仍直接输出文件内容',
-        );
+  if (ct.includes('application/json')) {
+    throw new Error('下载 Content-Type 为 application/json，期望 application/octet-stream 密文');
+  }
+  if (ct.includes('text/')) {
+    const s = new TextDecoder('utf-8', { fatal: false }).decode(head);
+    if (s.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(s.trim()) as unknown;
+        if (isPlainObjectRecord(parsed)) {
+          const urlKeys = ['url', 'downloadUrl', 'signedUrl', 'download_url', 'fileUrl'] as const;
+          for (const k of urlKeys) {
+            const v = parsed[k];
+            if (typeof v === 'string' && /^https?:\/\//i.test(v.trim())) {
+              throw new Error('服务端返回 JSON 链接而非密文');
+            }
+          }
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.includes('服务端返回')) throw e;
       }
     }
-  } catch (e) {
-    if (e instanceof Error && e.message.includes('服务端返回了 JSON 链接')) throw e;
+  }
+  if (data.byteLength < 5) throw new Error('下载密文过短');
+  const magic = [0x48, 0x53, 0x59, 0x4e, 0x01];
+  for (let i = 0; i < 5; i++) {
+    if (head[i] !== magic[i]) throw new Error('下载体不是有效密文 wire（魔数不匹配）');
   }
 }
 
@@ -448,7 +405,28 @@ function formatSyncError(err: unknown): string {
     if (err.response?.status === 413) {
       return '文件过大，已超过服务端允许的大小限制';
     }
+    if (err.response?.status === 404) {
+      return '资源不存在 (HTTP 404)';
+    }
     const data = err.response?.data;
+    if (data instanceof ArrayBuffer && data.byteLength > 0 && data.byteLength <= 4096) {
+      const s = new TextDecoder('utf-8', { fatal: false }).decode(data);
+      const t = s.trim();
+      if (t.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(t) as unknown;
+          if (isPlainObjectRecord(parsed)) {
+            const msg = parsed.message;
+            if (typeof msg === 'string' && msg.trim()) return humanizeKnownUploadErrorText(msg.trim());
+            const errMsg = parsed.error;
+            if (typeof errMsg === 'string' && errMsg.trim())
+              return humanizeKnownUploadErrorText(errMsg.trim());
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
     if (typeof data === 'string' && data.trim()) {
       const s = data.trim();
       try {
@@ -1128,6 +1106,9 @@ export default class ObsidianSyncPlugin extends Plugin {
   connectionState: SyncConnectionState = 'initializing';
   /** 是否因 DEVICE_REVOKED 进入待绑定（与 .sync_config.json 的 was_revoked 一致） */
   wasRevoked = false;
+  /** 内存中的 vault 密钥（32B），来自 .sync_crypto.json 或绑定解密 */
+  vaultKey: Uint8Array | null = null;
+  vaultKeyVersion = 1;
   /** 最近一次成功完成同步的时间（用于设置页展示） */
   lastSyncAt: number | null = null;
   /** 最近一次同步失败原因（成功同步后清空） */
@@ -1255,9 +1236,132 @@ export default class ObsidianSyncPlugin extends Plugin {
     return this.settings.serverUrl.trim().replace(/\/+$/, '');
   }
 
-  private deviceHeaders(): Record<string, string> {
+  /** 除 POST /api/init、POST /api/bind 外所有 sync API 使用 */
+  private syncApiHeaders(): Record<string, string> {
     if (!this.deviceId) return {};
-    return { 'x-device-id': this.deviceId };
+    return {
+      'X-Device-Id': this.deviceId,
+      'X-HailySync-Protocol': '1',
+    };
+  }
+
+  private async persistVaultKeyLocal(vaultKey: Uint8Array, vaultKeyVersion: number): Promise<void> {
+    if (vaultKey.length !== 32) throw new Error('E2EE_VAULT_KEY_LEN');
+    this.vaultKey = vaultKey;
+    this.vaultKeyVersion = vaultKeyVersion;
+    await this.app.vault.adapter.write(
+      SYNC_CRYPTO_FILENAME,
+      JSON.stringify(
+        {
+          vault_key_b64u: bytesToBase64url(vaultKey),
+          vault_key_version: vaultKeyVersion,
+        } satisfies SyncCryptoLocalFile,
+        null,
+        2,
+      ),
+    );
+  }
+
+  private async wipeVaultKeyLocal(): Promise<void> {
+    this.vaultKey = null;
+    this.vaultKeyVersion = 1;
+    try {
+      const exists = this.app.vault.getAbstractFileByPath(SYNC_CRYPTO_FILENAME);
+      if (exists instanceof TFile) await this.app.vault.delete(exists);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private assertBindEnvelopeMatchesRoot(data: {
+    kek_salt: string;
+    kek_derivation_version: number;
+    vault_key_version: number;
+    envelope: VaultEnvelopeJson;
+  }): void {
+    assertEnvelopeShape(data.envelope);
+    if (data.envelope.kek_salt !== data.kek_salt) throw new Error('E2EE_BIND_KEK_SALT_MISMATCH');
+    if (data.envelope.kek_derivation_version !== data.kek_derivation_version) {
+      throw new Error('E2EE_BIND_KEK_DERIVATION_MISMATCH');
+    }
+    if (data.envelope.vault_key_version !== data.vault_key_version) {
+      throw new Error('E2EE_BIND_VAULT_KEY_VERSION_MISMATCH');
+    }
+    if (data.envelope.envelope_version !== 1) throw new Error('E2EE_BIND_ENVELOPE_VERSION');
+    if (data.envelope.algorithm !== 'AES-256-GCM') throw new Error('E2EE_BIND_ENVELOPE_ALGORITHM');
+  }
+
+  /** 首设备：用 init 返回的 binding_code 派生 KEK、PUT envelope、落盘 vault_key */
+  private async bootstrapVaultFromInit(bindingCodeRaw: string | undefined): Promise<void> {
+    if (typeof bindingCodeRaw !== 'string' || !bindingCodeRaw.trim()) {
+      throw new Error('E2EE_INIT_MISSING_BINDING_CODE');
+    }
+    const normalized = normalizeBindingCode(bindingCodeRaw);
+    const salt = randomBytes(16);
+    const kekDerivationVersion = 1;
+    const vaultKeyVersion = 1;
+    const vaultKey = randomBytes(32);
+    const kek = await deriveKek(normalized, salt, kekDerivationVersion);
+    const envelope = await wrapVaultKeyToEnvelope(
+      vaultKey,
+      kek,
+      kekDerivationVersion,
+      salt,
+      vaultKeyVersion,
+    );
+    await axios.put<VaultEnvelopeJson>(`${this.baseUrl}/api/vault/envelope`, envelope, {
+      headers: this.syncApiHeaders(),
+      ...AXIOS_LARGE_FILE_DEFAULTS,
+    });
+    await this.persistVaultKeyLocal(vaultKey, vaultKeyVersion);
+  }
+
+  private async unlockVaultFromBindingCode(
+    bindingCodeRaw: string,
+    envelope: VaultEnvelopeJson,
+  ): Promise<void> {
+    const vaultKey = await unwrapVaultKeyFromEnvelope(
+      envelope,
+      normalizeBindingCode(bindingCodeRaw),
+    );
+    await this.persistVaultKeyLocal(vaultKey, envelope.vault_key_version);
+  }
+
+  /** GET /api/vault/envelope（与冻结协议字段一致） */
+  async fetchVaultEnvelope(): Promise<VaultEnvelopeJson> {
+    const res = await axios.get<VaultEnvelopeJson>(`${this.baseUrl}/api/vault/envelope`, {
+      headers: this.syncApiHeaders(),
+    });
+    if (!isPlainObjectRecord(res.data as unknown)) {
+      throw new Error('GET /api/vault/envelope 响应非法');
+    }
+    assertEnvelopeShape(res.data);
+    return res.data;
+  }
+
+  async ensureVaultKeyLoaded(): Promise<void> {
+    if (this.vaultKey != null && this.vaultKey.length === 32) return;
+    let raw: string;
+    try {
+      raw = await this.app.vault.adapter.read(SYNC_CRYPTO_FILENAME);
+    } catch {
+      throw new Error('E2EE_VAULT_KEY_MISSING');
+    }
+    let p: unknown;
+    try {
+      p = JSON.parse(raw || '{}') as unknown;
+    } catch {
+      throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+    }
+    if (!isPlainObjectRecord(p)) throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+    const kb = p.vault_key_b64u;
+    const vv = p.vault_key_version;
+    if (typeof kb !== 'string' || typeof vv !== 'number' || !Number.isFinite(vv)) {
+      throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
+    }
+    this.vaultKey = base64urlToBytes(kb);
+    this.vaultKeyVersion = vv;
+    if (this.vaultKey.length !== 32) throw new Error('E2EE_CRYPTO_FILE_CORRUPT');
   }
 
   /** pending_bind 时仅待绑定；否则读盘或 POST /api/init */
@@ -1330,12 +1434,35 @@ export default class ObsidianSyncPlugin extends Plugin {
       });
       const uid = res.data?.user_id;
       const did = res.data?.device_id;
+      const bindingCode = res.data?.binding_code;
       if (typeof uid !== 'string' || !uid.trim() || typeof did !== 'string' || !did.trim()) {
         this.connectionState = 'awaiting_bind';
         new Notice('初始化失败：服务端未返回 user_id / device_id');
         return;
       }
+      if (typeof bindingCode !== 'string' || !bindingCode.trim()) {
+        this.connectionState = 'awaiting_bind';
+        new Notice('初始化失败：服务端未返回 binding_code');
+        return;
+      }
       await this.persistFullIdentity(uid.trim(), did.trim());
+      try {
+        await this.bootstrapVaultFromInit(bindingCode);
+      } catch (e) {
+        await this.wipeVaultKeyLocal();
+        this.userId = '';
+        this.deviceId = '';
+        this.connectionState = 'awaiting_bind';
+        await this.app.vault.adapter.write(
+          SYNC_CONFIG_FILENAME,
+          JSON.stringify({ pending_bind: true } satisfies SyncIdentityConfig, null, 2),
+        );
+        new Notice(
+          'Vault 密钥包上传失败，已回滚本地设备配置：' + formatSyncError(e),
+          12000,
+        );
+        return;
+      }
     } catch (e) {
       this.connectionState = 'awaiting_bind';
       if (isNetworkError(e)) {
@@ -1362,6 +1489,7 @@ export default class ObsidianSyncPlugin extends Plugin {
   }
 
   async handleDeviceRevoked(): Promise<void> {
+    await this.wipeVaultKeyLocal();
     this.connectionState = 'awaiting_bind';
     this.wasRevoked = true;
     this.userId = '';
@@ -1383,7 +1511,7 @@ export default class ObsidianSyncPlugin extends Plugin {
     if (!server) return null;
     try {
       const res = await axios.get(`${server}/api/binding-code`, {
-        headers: this.deviceHeaders(),
+        headers: this.syncApiHeaders(),
       });
       return extractBindingCodeFromJson(res.data);
     } catch (e) {
@@ -1405,7 +1533,7 @@ export default class ObsidianSyncPlugin extends Plugin {
     const server = this.baseUrl;
     if (!server) return false;
     try {
-      await axios.post(`${server}/api/binding-code/reset`, {}, { headers: this.deviceHeaders() });
+      await axios.post(`${server}/api/binding-code/reset`, {}, { headers: this.syncApiHeaders() });
       return true;
     } catch (e) {
       if (isDeviceRevokedError(e)) {
@@ -1427,7 +1555,7 @@ export default class ObsidianSyncPlugin extends Plugin {
     if (!this.deviceId) return { ok: false, message: '无效的设备' };
     try {
       const res = await axios.get(`${this.baseUrl}/api/devices`, {
-        headers: this.deviceHeaders(),
+        headers: this.syncApiHeaders(),
       });
       const devices = parseDevicesListPayload(res.data);
       return { ok: true, devices };
@@ -1451,7 +1579,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       await axios.post(
         `${server}/api/device/delete`,
         { device_id: targetId },
-        { headers: this.deviceHeaders() },
+        { headers: this.syncApiHeaders() },
       );
       new Notice('已删除设备');
       return true;
@@ -1482,18 +1610,49 @@ export default class ObsidianSyncPlugin extends Plugin {
       return false;
     }
     try {
-      const res = await axios.post<{ user_id?: string; device_id?: string }>(
-        `${server}/api/bind`,
-        {
-          binding_code: code,
-          device_name: getDeviceDisplayName(),
-          device_type: getDeviceTypeLabel(),
-        },
-      );
+      const res = await axios.post<{
+        user_id?: string;
+        device_id?: string;
+        kek_salt?: string;
+        kek_derivation_version?: number;
+        vault_key_version?: number;
+        envelope?: VaultEnvelopeJson;
+      }>(`${server}/api/bind`, {
+        binding_code: code,
+        device_name: getDeviceDisplayName(),
+        device_type: getDeviceTypeLabel(),
+      });
       const uid = res.data?.user_id;
       const did = res.data?.device_id;
+      const kekSalt = res.data?.kek_salt;
+      const kekDv = res.data?.kek_derivation_version;
+      const vkv = res.data?.vault_key_version;
+      const envelope = res.data?.envelope;
       if (typeof uid !== 'string' || !uid.trim() || typeof did !== 'string' || !did.trim()) {
         new Notice('绑定失败：服务端未返回有效信息，请稍后重试', 6000);
+        return false;
+      }
+      if (
+        typeof kekSalt !== 'string' ||
+        typeof kekDv !== 'number' ||
+        typeof vkv !== 'number' ||
+        envelope == null ||
+        typeof envelope !== 'object'
+      ) {
+        new Notice('绑定失败：服务端未返回完整 envelope / kek 字段', 8000);
+        return false;
+      }
+      try {
+        this.assertBindEnvelopeMatchesRoot({
+          kek_salt: kekSalt,
+          kek_derivation_version: kekDv,
+          vault_key_version: vkv,
+          envelope,
+        });
+        await this.unlockVaultFromBindingCode(code, envelope);
+      } catch (e) {
+        new Notice('绑定解密失败：' + formatSyncError(e), 12000);
+        await this.wipeVaultKeyLocal();
         return false;
       }
       await this.persistFullIdentity(uid.trim(), did.trim());
@@ -1520,10 +1679,31 @@ export default class ObsidianSyncPlugin extends Plugin {
       const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
       const parsed = JSON.parse(content || '{}') as unknown;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const raw = parsed as SyncMetaMap;
+        const raw = parsed as Record<string, unknown>;
         const out: SyncMetaMap = {};
         for (const [k, v] of Object.entries(raw)) {
-          out[normalizeVaultPath(k)] = v;
+          const path = normalizeVaultPath(k);
+          if (!isPlainObjectRecord(v)) continue;
+          const rec = v;
+          const ch = rec.cipher_hash;
+          const cs = rec.cipher_size;
+          out[path] = {
+            cipher_hash: typeof ch === 'string' ? ch.toLowerCase() : null,
+            cipher_size: typeof cs === 'number' ? cs : null,
+            updated_at:
+              typeof rec.updated_at === 'number' && Number.isFinite(rec.updated_at)
+                ? rec.updated_at
+                : Date.now(),
+            deleted: rec.deleted === true,
+            encryption_version:
+              typeof rec.encryption_version === 'number'
+                ? rec.encryption_version
+                : ENCRYPTION_VERSION_WIRE,
+            vault_key_version:
+              typeof rec.vault_key_version === 'number' ? rec.vault_key_version : 1,
+            plain_fingerprint:
+              typeof rec.plain_fingerprint === 'string' ? rec.plain_fingerprint : '',
+          };
         }
         return out;
       }
@@ -1545,47 +1725,34 @@ export default class ObsidianSyncPlugin extends Plugin {
       .filter(shouldSync);
   }
 
-  /** GET /files → path→meta 映射（仅 map；解析一次后 normalize，不再覆盖） */
+  /** GET /files → { items } → path→meta */
   async fetchRemoteFiles(): Promise<SyncMetaMap> {
     const res = await axios.get(this.baseUrl + '/files', {
-      headers: this.deviceHeaders(),
+      headers: this.syncApiHeaders(),
       responseType: 'text',
     });
     const raw = res.data as unknown;
 
     console.log('RAW /files response:', raw);
 
-    let data: unknown = raw;
-    if (typeof data === 'string') {
-      const s = data.trim();
-      if (s === '') {
-        data = {};
-      } else {
-        try {
-          data = JSON.parse(s) as unknown;
-        } catch (e) {
-          console.error('JSON parse failed', e);
-          data = {};
-        }
-      }
+    if (typeof raw !== 'string') {
+      throw new Error('/files 响应类型异常');
+    }
+    const s = raw.trim();
+    if (s === '') {
+      throw new Error('/files 空响应');
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(s) as unknown;
+    } catch (e) {
+      console.error('JSON parse failed', e);
+      throw new Error('/files 响应不是合法 JSON');
     }
 
-    if (Array.isArray(data)) {
-      console.error(
-        '/files 期望 path→metadata 的对象；收到数组已忽略（请服务端改为 map 或包在 files 对象内）',
-      );
-      const empty: SyncMetaMap = {};
-      console.log('remoteFiles map:', empty);
-      return empty;
-    }
+    const remoteFiles = parseRemoteFilesItems(data);
 
-    const payload = extractRemoteFilesMapPayload(data);
-    const pk = Object.keys(payload);
-    console.log('/files extract:', { keyCount: pk.length, sampleKeys: pk.slice(0, 12) });
-
-    const remoteFiles = normalizeRemoteMap(payload);
-
-    console.log('remoteFiles map:', remoteFiles);
+    console.log('/files items → paths:', Object.keys(remoteFiles).length);
     return remoteFiles;
   }
 
@@ -1593,12 +1760,22 @@ export default class ObsidianSyncPlugin extends Plugin {
     const normalized = normalizeVaultPath(filePath);
     try {
       if (!this.deviceId) {
-        throw new Error('缺少设备 ID，无法上传（需要 x-device-id）');
+        throw new Error('缺少设备 ID（需要 X-Device-Id）');
       }
+      await this.ensureVaultKeyLoaded();
       const content = await this.app.vault.adapter.read(normalized);
-      const hash = md5(content || '');
+      const plain = new TextEncoder().encode(content ?? '');
+      const plainFp = md5(content || '');
+      const wire = await encryptPlainToWire(
+        plain,
+        normalized,
+        this.vaultKey!,
+        this.vaultKeyVersion,
+      );
+      const cipher_hash = await sha256HexOfBytes(wire);
+      const cipher_size = wire.length;
 
-      console.log('upload:', normalized, (content || '').length, hash);
+      console.log('upload e2ee:', normalized, plain.length, cipher_hash);
 
       const updated_at = Date.now();
       const form = new FormData();
@@ -1607,22 +1784,49 @@ export default class ObsidianSyncPlugin extends Plugin {
         : normalized;
       form.append(
         'file',
-        new Blob([content || ''], { type: 'application/octet-stream' }),
+        new Blob([wire], { type: 'application/octet-stream' }),
         basename || 'file',
       );
-      form.append('path', normalized);
-      form.append('hash', hash);
+      form.append('relative_path', normalized);
       form.append('updated_at', String(updated_at));
+      form.append('cipher_hash', cipher_hash);
+      form.append('cipher_size', String(cipher_size));
+      form.append('encryption_version', String(ENCRYPTION_VERSION_WIRE));
+      form.append('vault_key_version', String(this.vaultKeyVersion));
 
-      await axios.post(this.baseUrl + '/upload', form, {
-        headers: this.deviceHeaders(),
+      const uploadRes = await axios.post<{
+        success?: boolean;
+        relative_path?: string;
+        updated_at?: number;
+        cipher_hash?: string;
+        cipher_size?: number;
+        encryption_version?: number;
+        vault_key_version?: number;
+      }>(this.baseUrl + '/upload', form, {
+        headers: this.syncApiHeaders(),
         ...AXIOS_LARGE_FILE_DEFAULTS,
       });
 
+      const d = uploadRes.data;
+      if (
+        d.success !== true ||
+        typeof d.cipher_hash !== 'string' ||
+        typeof d.cipher_size !== 'number' ||
+        typeof d.updated_at !== 'number' ||
+        typeof d.encryption_version !== 'number' ||
+        typeof d.vault_key_version !== 'number'
+      ) {
+        throw new Error('上传响应字段不完整或 success 非 true');
+      }
+
       meta[normalized] = {
-        hash,
-        updated_at,
+        cipher_hash: d.cipher_hash.toLowerCase(),
+        cipher_size: d.cipher_size,
+        updated_at: d.updated_at,
         deleted: false,
+        encryption_version: d.encryption_version,
+        vault_key_version: d.vault_key_version,
+        plain_fingerprint: plainFp,
       };
     } catch (err) {
       console.error('upload failed:', normalized, err);
@@ -1630,21 +1834,33 @@ export default class ObsidianSyncPlugin extends Plugin {
     }
   }
 
-  async downloadFile(filePath: string, meta: SyncMetaMap): Promise<void> {
+  async downloadFile(filePath: string, meta: SyncMetaMap, remote: SyncFileMeta): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
     try {
+      if (!this.deviceId) {
+        throw new Error('缺少设备 ID（需要 X-Device-Id）');
+      }
+      await this.ensureVaultKeyLoaded();
+      if (remote.encryption_version !== ENCRYPTION_VERSION_WIRE) {
+        throw new Error(`不支持的 encryption_version:${remote.encryption_version}`);
+      }
       const res = await axios.get(this.baseUrl + '/download', {
-        params: { path: normalized },
-        headers: this.deviceHeaders(),
-        responseType: 'text',
+        params: { relative_path: normalized },
+        headers: this.syncApiHeaders(),
+        responseType: 'arraybuffer',
         ...AXIOS_LARGE_FILE_DEFAULTS,
       });
 
-      const content = res.data || '';
-      assertDownloadBodyIsRawFileContent(
-        typeof content === 'string' ? content : String(content),
-        res.headers['content-type'],
+      const buf = httpResponseBodyToArrayBuffer(res.data);
+      assertDownloadWireResponse(buf, res.headers['content-type']);
+
+      const plainBuf = await decryptWireToPlain(
+        new Uint8Array(buf),
+        normalized,
+        this.vaultKey!,
       );
+      const content = new TextDecoder('utf-8', { fatal: false }).decode(plainBuf);
+      const plainFp = md5(content);
 
       const exists = this.app.vault.getAbstractFileByPath(normalized);
 
@@ -1655,56 +1871,86 @@ export default class ObsidianSyncPlugin extends Plugin {
         await this.app.vault.create(normalized, content);
       }
 
-      const hash = md5(content);
-      const updated_at = Date.now();
       meta[normalized] = {
-        hash,
-        updated_at,
+        cipher_hash:
+          typeof remote.cipher_hash === 'string' ? remote.cipher_hash.toLowerCase() : null,
+        cipher_size: remote.cipher_size,
+        updated_at: remote.updated_at,
         deleted: false,
+        encryption_version: remote.encryption_version,
+        vault_key_version: remote.vault_key_version,
+        plain_fingerprint: plainFp,
       };
 
-      console.log('download:', normalized, content.length, hash);
+      console.log('download e2ee:', normalized, content.length, plainFp);
     } catch (err) {
+      if (isAxiosError(err) && err.response?.status === 404) {
+        throw new Error(`下载失败：远端无此文件 (HTTP 404) · ${normalized}`);
+      }
       console.error('download failed:', normalized, err);
       throw err;
     }
   }
 
-  /** 将远端内容写入 `原名.conflict.md`，不覆盖本地正文 */
-  async writeConflictFromRemote(filePath: string): Promise<void> {
+  /** 将远端密文解密后写入 `原名.conflict.md` */
+  async writeConflictFromRemote(filePath: string, remote: SyncFileMeta): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
-    const res = await axios.get(this.baseUrl + '/download', {
-      params: { path: normalized },
-      headers: this.deviceHeaders(),
-      responseType: 'text',
-      ...AXIOS_LARGE_FILE_DEFAULTS,
-    });
-    const content = res.data || '';
-    assertDownloadBodyIsRawFileContent(
-      typeof content === 'string' ? content : String(content),
-      res.headers['content-type'],
-    );
-    const withoutMd = normalized.replace(/\.md$/i, '');
-    const conflictPath = `${withoutMd}.conflict.md`;
-    await ensureVaultFoldersForPath(this.app.vault, conflictPath);
-    const exists = this.app.vault.getAbstractFileByPath(conflictPath);
-    if (exists) {
-      await this.app.vault.adapter.write(conflictPath, content);
-    } else {
-      await this.app.vault.create(conflictPath, content);
+    await this.ensureVaultKeyLoaded();
+    if (remote.encryption_version !== ENCRYPTION_VERSION_WIRE) {
+      throw new Error(`不支持的 encryption_version:${remote.encryption_version}`);
     }
-    console.log('sync decision:', normalized, 'conflict', 'WROTE_CONFLICT_COPY', conflictPath);
+    try {
+      const res = await axios.get(this.baseUrl + '/download', {
+        params: { relative_path: normalized },
+        headers: this.syncApiHeaders(),
+        responseType: 'arraybuffer',
+        ...AXIOS_LARGE_FILE_DEFAULTS,
+      });
+      const buf = httpResponseBodyToArrayBuffer(res.data);
+      assertDownloadWireResponse(buf, res.headers['content-type']);
+      const plainBuf = await decryptWireToPlain(
+        new Uint8Array(buf),
+        normalized,
+        this.vaultKey!,
+      );
+      const content = new TextDecoder('utf-8', { fatal: false }).decode(plainBuf);
+      const withoutMd = normalized.replace(/\.md$/i, '');
+      const conflictPath = `${withoutMd}.conflict.md`;
+      await ensureVaultFoldersForPath(this.app.vault, conflictPath);
+      const exists = this.app.vault.getAbstractFileByPath(conflictPath);
+      if (exists) {
+        await this.app.vault.adapter.write(conflictPath, content);
+      } else {
+        await this.app.vault.create(conflictPath, content);
+      }
+      console.log('sync decision:', normalized, 'conflict', 'WROTE_CONFLICT_COPY', conflictPath);
+    } catch (err) {
+      if (isAxiosError(err) && err.response?.status === 404) {
+        throw new Error(`冲突副本下载失败：远端无此文件 (HTTP 404) · ${normalized}`);
+      }
+      throw err;
+    }
   }
 
   async postDeleteRemote(filePath: string): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
-    await axios.post(
+    const updated_at = Date.now();
+    const res = await axios.post<{
+      success?: boolean;
+      relative_path?: string;
+      updated_at?: number;
+    }>(
       this.baseUrl + '/delete',
       {
-        path: normalized,
+        relative_path: normalized,
+        updated_at,
       },
-      { headers: this.deviceHeaders() },
+      { headers: this.syncApiHeaders() },
     );
+    const d = res.data;
+    if (d.success !== true || d.relative_path !== normalized || typeof d.updated_at !== 'number') {
+      throw new Error('删除响应不符合冻结协议（success / relative_path / updated_at）');
+    }
   }
 
   async deleteLocalFile(path: string): Promise<void> {
@@ -1753,6 +1999,16 @@ export default class ObsidianSyncPlugin extends Plugin {
         } else {
           new Notice('请先完成设备初始化或输入绑定码后再同步', 8000);
         }
+        if (isAuto) console.log('[auto-sync] failed');
+        return;
+      }
+
+      try {
+        await this.ensureVaultKeyLoaded();
+      } catch (e) {
+        this.lastSyncError = formatSyncError(e);
+        this.setSyncStatusFailed();
+        new Notice('无法加载 vault 密钥（需完成 init/bind）：' + formatSyncError(e), 12000);
         if (isAuto) console.log('[auto-sync] failed');
         return;
       }
@@ -1809,13 +2065,13 @@ export default class ObsidianSyncPlugin extends Plugin {
       for (const path of sortedPaths) {
         const abstract = this.app.vault.getAbstractFileByPath(path);
         const localExists = abstract instanceof TFile;
-        let localHash: string | null = null;
+        let localPlainFp: string | null = null;
         if (localExists) {
           try {
             const content = await this.app.vault.adapter.read(path);
-            localHash = md5(content || '');
+            localPlainFp = md5(content || '');
           } catch {
-            localHash = null;
+            localPlainFp = null;
           }
         }
 
@@ -1850,14 +2106,14 @@ export default class ObsidianSyncPlugin extends Plugin {
           }
 
           if (localExists) {
-            if (localHash === null) {
+            if (localPlainFp === null) {
               console.log('sync decision:', path, 'noop', 'read_failed');
               continue;
             }
             console.log('compare:', {
               filePath: path,
-              localHash,
-              remoteHash: r?.hash,
+              localPlainFp,
+              remoteCipher: r?.cipher_hash,
             });
 
             if (!r) {
@@ -1866,46 +2122,64 @@ export default class ObsidianSyncPlugin extends Plugin {
               continue;
             }
 
-            const remoteHashStr =
-              typeof r.hash === 'string' ? r.hash : String(r.hash ?? '');
-            if (remoteHashStr !== localHash) {
-              const baseRaw = meta[path]?.hash;
-              const baseStr =
-                typeof baseRaw === 'string' ? baseRaw : baseRaw != null ? String(baseRaw) : '';
-              const hasBase = baseStr.length > 0;
+            const remoteCipherStr =
+              typeof r.cipher_hash === 'string' ? r.cipher_hash.toLowerCase() : '';
+            if (
+              remoteCipherStr === '' ||
+              r.encryption_version !== ENCRYPTION_VERSION_WIRE
+            ) {
+              console.log('sync decision:', path, 'noop', 'remote_cipher_or_enc_invalid');
+              continue;
+            }
 
-              if (hasBase && baseStr !== localHash && baseStr !== remoteHashStr) {
-                console.log('sync decision:', path, 'conflict', 'BOTH_MODIFIED');
-                await this.writeConflictFromRemote(path);
-                continue;
-              }
-              if (hasBase && baseStr === localHash) {
-                console.log('sync decision:', path, 'download', 'REMOTE_MODIFIED');
-                await this.downloadFile(path, meta);
-                continue;
-              }
-              if (hasBase && baseStr === remoteHashStr) {
-                console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED');
-                await this.uploadFile(path, meta);
-                continue;
-              }
-              console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED_OR_NO_BASE');
+            const baseCipherRaw = meta[path]?.cipher_hash;
+            const baseCipherStr =
+              typeof baseCipherRaw === 'string' ? baseCipherRaw.toLowerCase() : '';
+            const basePlain = meta[path]?.plain_fingerprint ?? '';
+            const hasBase = baseCipherStr.length > 0;
+
+            if (
+              hasBase &&
+              baseCipherStr === remoteCipherStr &&
+              basePlain === localPlainFp
+            ) {
+              console.log('sync decision:', path, 'noop', 'SYNCED');
+              meta[path] = {
+                cipher_hash: remoteCipherStr,
+                cipher_size: r.cipher_size,
+                updated_at: r.updated_at,
+                deleted: false,
+                encryption_version: r.encryption_version,
+                vault_key_version: r.vault_key_version,
+                plain_fingerprint: localPlainFp,
+              };
+              continue;
+            }
+
+            if (hasBase && basePlain !== localPlainFp && baseCipherStr !== remoteCipherStr) {
+              console.log('sync decision:', path, 'conflict', 'BOTH_MODIFIED');
+              await this.writeConflictFromRemote(path, r);
+              continue;
+            }
+            if (hasBase && basePlain === localPlainFp && baseCipherStr !== remoteCipherStr) {
+              console.log('sync decision:', path, 'download', 'REMOTE_MODIFIED');
+              await this.downloadFile(path, meta, r);
+              continue;
+            }
+            if (hasBase && baseCipherStr === remoteCipherStr && basePlain !== localPlainFp) {
+              console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED');
               await this.uploadFile(path, meta);
               continue;
             }
 
-            console.log('sync decision:', path, 'noop', 'SYNCED');
-            meta[path] = {
-              hash: localHash,
-              updated_at: typeof r.updated_at === 'number' ? r.updated_at : Date.now(),
-              deleted: false,
-            };
+            console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED_OR_NO_BASE');
+            await this.uploadFile(path, meta);
             continue;
           }
 
           if (r) {
             console.log('sync decision:', path, 'download', 'REMOTE_NEW');
-            await this.downloadFile(path, meta);
+            await this.downloadFile(path, meta, r);
             continue;
           }
         } catch (e) {

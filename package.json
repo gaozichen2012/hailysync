@@ -1,18 +1,20 @@
 {
   "name": "obsidian-sync-plugin",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "Obsidian 插件：JSON 协议与 sync-server 双向同步（hash + /files）",
   "main": "main.js",
   "scripts": {
     "build": "esbuild main.ts --bundle --platform=node --format=cjs --outfile=main.js --external:obsidian",
-    "dev": "esbuild main.ts --bundle --platform=node --format=cjs --outfile=main.js --external:obsidian --watch"
+    "dev": "esbuild main.ts --bundle --platform=node --format=cjs --outfile=main.js --external:obsidian --watch",
+    "selftest:e2ee": "esbuild e2ee-selftest.ts --bundle --platform=node --format=cjs --outfile=tmp-e2ee-selftest.cjs && node tmp-e2ee-selftest.cjs"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "axios": "^1.13.6",
-    "blueimp-md5": "^2.19.0"
+    "blueimp-md5": "^2.19.0",
+    "hash-wasm": "^4.12.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

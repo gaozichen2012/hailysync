@@ -1,5 +1,6 @@
 node_modules/
 .DS_Store
+tmp-e2ee-selftest.cjs
 
 # 自动化测试 vault 运行时产物（仅跟踪 .gitkeep）
 test/vault-A/*
