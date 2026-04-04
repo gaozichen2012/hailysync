@@ -14,15 +14,17 @@
 }
 
 .hailysync-settings-title h2 {
-	margin-bottom: 0.15em;
+	font-size: var(--font-ui-large);
+	font-weight: 600;
+	line-height: 1.35;
+	margin-top: 0;
+	margin-bottom: 0.35em;
+	letter-spacing: 0.01em;
 }
 
-.hailysync-settings-brand-en {
-	font-size: var(--font-ui-medium);
-	font-weight: 500;
-	color: var(--text-muted);
-	line-height: 1.35;
-	margin-bottom: 0.35em;
+/* 合并标题后无独立描述时，收起多余占位 */
+.hailysync-settings-root .setting-item .setting-item-description:empty {
+	display: none;
 }
 
 /* 根内 Obsidian Setting：取消额外左右缩进，与标题同垂线 */
@@ -65,8 +67,8 @@
 }
 
 .vault-sync-section {
-	margin-top: 1em;
-	margin-bottom: 0.25em;
+	margin-top: 0.65em;
+	margin-bottom: 0.15em;
 }
 
 .vault-sync-section-label {
@@ -75,7 +77,7 @@
 	color: var(--text-muted);
 	text-transform: uppercase;
 	letter-spacing: 0.06em;
-	margin-bottom: 0.35em;
+	margin-bottom: 0.25em;
 }
 
 .vault-sync-guide-section {
@@ -96,7 +98,8 @@
 	font-size: var(--font-ui-small);
 	color: var(--text-muted);
 	line-height: 1.45;
-	margin-bottom: 0.5em;
+	margin-bottom: 0.35em;
+	margin-top: 0.35em;
 }
 
 .vault-sync-guide-meta {
@@ -106,13 +109,13 @@
 }
 
 .vault-sync-guide-actions {
-	margin-top: 0.5em;
+	margin-top: 0.35em;
 }
 
 /* 卡片：水平方向不单独加 padding，与 root 基线重合 */
 .vault-sync-sync-status-section {
-	padding-top: 0.75em;
-	padding-bottom: 0.75em;
+	padding-top: 0.55em;
+	padding-bottom: 0.55em;
 	padding-left: 0;
 	padding-right: 0;
 	border-radius: var(--radius-m);
@@ -122,12 +125,13 @@
 .vault-sync-status-line {
 	font-size: var(--font-ui-medium);
 	font-weight: 500;
-	margin-bottom: 0.25em;
+	margin-bottom: 0.15em;
+	line-height: 1.45;
 }
 
 .vault-sync-binding-card {
-	margin-top: 0.75em;
-	padding: 1em 0 0.75em;
+	margin-top: 0.55em;
+	padding: 0.65em 0 0.55em;
 	border-radius: var(--radius-m);
 	border: 1px solid var(--background-modifier-border);
 	background: var(--background-primary-alt);
@@ -281,8 +285,8 @@
 }
 
 .vault-sync-advanced {
-	margin-top: 1.25em;
-	padding: 0.5em 0;
+	margin-top: 0.85em;
+	padding: 0.4em 0;
 	border-top: 1px solid var(--background-modifier-border);
 }
 

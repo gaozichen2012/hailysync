@@ -574,19 +574,17 @@ class HailySyncSettingTab extends PluginSettingTab {
     const st = this.plugin.connectionState;
 
     if (wasRevoked) {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '当前设备已被移除' });
       el.createEl('div', {
-        cls: 'setting-item-description',
-        text: '请在下方「绑定新设备」中输入设备绑定码以恢复同步。',
+        cls: 'vault-sync-status-line',
+        text: '当前设备已被移除 · 请在下方「绑定新设备」中输入设备绑定码以恢复同步。',
       });
       return;
     }
 
     if (st === 'awaiting_bind') {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '未连接' });
       el.createEl('div', {
-        cls: 'setting-item-description',
-        text: '请输入设备绑定码以连接并开始同步。',
+        cls: 'vault-sync-status-line',
+        text: '未连接 · 请输入设备绑定码以连接并开始同步。',
       });
       return;
     }
@@ -597,37 +595,28 @@ class HailySyncSettingTab extends PluginSettingTab {
     }
 
     if (!this.plugin.deviceId) {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '未连接' });
       el.createEl('div', {
-        cls: 'setting-item-description',
-        text: '完成设备绑定后即可开始同步。',
+        cls: 'vault-sync-status-line',
+        text: '未连接 · 完成设备绑定后即可开始同步。',
       });
       return;
     }
 
     if (syncing) {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '正在同步…' });
-      el.createEl('div', {
-        cls: 'setting-item-description',
-        text:
-          this.plugin.lastSyncAt != null
-            ? `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`
-            : '尚未同步',
-      });
+      const tail =
+        this.plugin.lastSyncAt != null
+          ? `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`
+          : '尚未同步';
+      el.createEl('div', { cls: 'vault-sync-status-line', text: `正在同步… · ${tail}` });
       return;
     }
 
     if (this.plugin.lastSyncError) {
-      el.createEl('div', {
-        cls: 'vault-sync-status-line',
-        text: '同步失败，请检查网络后重试',
-      });
+      let line = '同步失败，请检查网络后重试';
       if (this.plugin.lastSyncAt != null) {
-        el.createEl('div', {
-          cls: 'setting-item-description',
-          text: `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`,
-        });
+        line += ` · 最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`;
       }
+      el.createEl('div', { cls: 'vault-sync-status-line', text: line });
       return;
     }
 
@@ -636,18 +625,14 @@ class HailySyncSettingTab extends PluginSettingTab {
       return;
     }
 
-    el.createEl('div', { cls: 'vault-sync-status-line', text: '同步运行正常' });
-    if (this.plugin.lastSyncAt != null) {
-      el.createEl('div', {
-        cls: 'setting-item-description',
-        text: `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`,
-      });
-    } else {
-      el.createEl('div', {
-        cls: 'setting-item-description',
-        text: '尚未同步',
-      });
-    }
+    const syncTail =
+      this.plugin.lastSyncAt != null
+        ? `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`
+        : '尚未同步';
+    el.createEl('div', {
+      cls: 'vault-sync-status-line',
+      text: `同步运行正常 · ${syncTail}`,
+    });
 
     if (this.devices.length < 2) {
       el.createEl('div', {
@@ -976,8 +961,7 @@ class HailySyncSettingTab extends PluginSettingTab {
     const root = containerEl.createDiv({ cls: 'hailysync-settings-root' });
 
     const titleRow = root.createDiv({ cls: 'hailysync-settings-title' });
-    titleRow.createEl('h2', { text: '海狸同步' });
-    titleRow.createEl('div', { cls: 'hailysync-settings-brand-en', text: 'HailySync' });
+    titleRow.createEl('h2', { text: '海狸同步 HailySync' });
 
     const syncWrap = root.createDiv({ cls: 'vault-sync-section vault-sync-sync-status-section' });
     syncWrap.createEl('div', { cls: 'vault-sync-section-label', text: '同步状态' });
@@ -990,8 +974,7 @@ class HailySyncSettingTab extends PluginSettingTab {
 
     const bindingBlock = root.createDiv({ cls: 'vault-sync-binding-card' });
     new Setting(bindingBlock)
-      .setName('设备绑定码')
-      .setDesc('用于连接新设备，请妥善保存，避免泄露')
+      .setName('设备绑定码（用于连接新设备，请妥善保存）')
       .addButton((btn) =>
         btn.setButtonText('显示').onClick(() => {
           void this.onShowReveal();
@@ -1065,8 +1048,7 @@ class HailySyncSettingTab extends PluginSettingTab {
     this.renderDeviceList();
 
     new Setting(root)
-      .setName('自动同步')
-      .setDesc('开启后将自动定期同步（推荐开启）')
+      .setName('自动同步（推荐开启）')
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
           this.plugin.settings.enableSync = value;
