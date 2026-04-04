@@ -1,3 +1,18 @@
+/* 设置页统一水平内边距（与卡片内容左边缘对齐） */
+.hailysync-settings-root {
+	--hailysync-pad-x: 16px;
+	padding-left: var(--hailysync-pad-x);
+	padding-right: var(--hailysync-pad-x);
+	box-sizing: border-box;
+}
+
+.hailysync-settings-title {
+	margin-left: 0;
+	margin-right: 0;
+	padding-left: 0;
+	padding-right: 0;
+}
+
 .hailysync-settings-title h2 {
 	margin-bottom: 0.15em;
 }
@@ -8,6 +23,45 @@
 	color: var(--text-muted);
 	line-height: 1.35;
 	margin-bottom: 0.35em;
+}
+
+/* 根内 Obsidian Setting：取消额外左右缩进，与标题同垂线 */
+.hailysync-settings-root .setting-item {
+	padding-left: 0;
+	padding-right: 0;
+}
+
+.hailysync-settings-root .vault-sync-binding-card .setting-item-control,
+.hailysync-settings-root .vault-sync-devices-block .setting-item-control {
+	margin-left: 0;
+	justify-content: flex-start;
+	flex-wrap: wrap;
+	gap: 0.35em;
+}
+
+/* 绑定新设备：控件区与文案左对齐占满行 */
+.hailysync-settings-root .vault-sync-bind-block .setting-item {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 0.5em;
+}
+
+.hailysync-settings-root .vault-sync-bind-block .setting-item-info {
+	padding: 0;
+	margin: 0;
+}
+
+.hailysync-settings-root .vault-sync-bind-block .setting-item-control {
+	margin-left: 0;
+	width: 100%;
+	justify-content: flex-start;
+	flex-wrap: wrap;
+	gap: 0.5em;
+}
+
+.hailysync-settings-root .vault-sync-bind-block .setting-item-control input[type='text'] {
+	width: 100%;
+	max-width: 100%;
 }
 
 .vault-sync-section {
@@ -55,8 +109,12 @@
 	margin-top: 0.5em;
 }
 
+/* 卡片：水平方向不单独加 padding，与 root 基线重合 */
 .vault-sync-sync-status-section {
-	padding: 0.75em 1em;
+	padding-top: 0.75em;
+	padding-bottom: 0.75em;
+	padding-left: 0;
+	padding-right: 0;
 	border-radius: var(--radius-m);
 	border: 1px solid var(--background-modifier-border);
 }
@@ -69,7 +127,7 @@
 
 .vault-sync-binding-card {
 	margin-top: 0.75em;
-	padding: 1em 1em 0.75em;
+	padding: 1em 0 0.75em;
 	border-radius: var(--radius-m);
 	border: 1px solid var(--background-modifier-border);
 	background: var(--background-primary-alt);
@@ -155,19 +213,30 @@
 	opacity: 0.88;
 }
 
+.vault-sync-device-list {
+	margin-left: 0;
+	padding-left: 0;
+}
+
 .vault-sync-device-table {
 	width: 100%;
 	border-collapse: collapse;
 	margin-top: 0.5em;
+	margin-left: 0;
 	font-size: var(--font-ui-small);
 }
 
 .vault-sync-device-table th,
 .vault-sync-device-table td {
-	padding: 0.45em 0.5em;
+	padding: 0.45em 0.5em 0.45em 0;
 	border-bottom: 1px solid var(--background-modifier-border);
 	text-align: left;
 	vertical-align: top;
+}
+
+.vault-sync-device-table th:last-child,
+.vault-sync-device-table td:last-child {
+	padding-right: 0;
 }
 
 .vault-sync-device-row-current {
@@ -209,10 +278,6 @@
 .vault-sync-tag-current {
 	color: var(--text-accent);
 	font-size: var(--font-ui-smaller);
-}
-
-.vault-sync-advanced-hint {
-	margin: 0.35em 0 0.5em;
 }
 
 .vault-sync-advanced {

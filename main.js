@@ -17904,7 +17904,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
       el.createEl("div", { cls: "vault-sync-status-line", text: "\u6B63\u5728\u540C\u6B65\u2026" });
       el.createEl("div", {
         cls: "setting-item-description",
-        text: this.plugin.lastSyncAt != null ? `\u6700\u8FD1\u540C\u6B65\uFF1A${formatRelativeTimeShort(this.plugin.lastSyncAt)}` : "\u6700\u8FD1\u540C\u6B65\uFF1A\u5C1A\u672A\u540C\u6B65"
+        text: this.plugin.lastSyncAt != null ? `\u6700\u8FD1\u540C\u6B65\uFF1A${formatRelativeTimeShort(this.plugin.lastSyncAt)}` : "\u5C1A\u672A\u540C\u6B65"
       });
       return;
     }
@@ -17934,7 +17934,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
     } else {
       el.createEl("div", {
         cls: "setting-item-description",
-        text: "\u6700\u8FD1\u540C\u6B65\uFF1A\u5C1A\u672A\u540C\u6B65"
+        text: "\u5C1A\u672A\u540C\u6B65"
       });
     }
     if (this.devices.length < 2) {
@@ -18226,17 +18226,18 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
     this.revealHint = null;
     this.syncStatusContainerEl = null;
     this.debugIdentityEl = null;
-    const titleRow = containerEl.createDiv({ cls: "hailysync-settings-title" });
+    const root = containerEl.createDiv({ cls: "hailysync-settings-root" });
+    const titleRow = root.createDiv({ cls: "hailysync-settings-title" });
     titleRow.createEl("h2", { text: "\u6D77\u72F8\u540C\u6B65" });
     titleRow.createEl("div", { cls: "hailysync-settings-brand-en", text: "HailySync" });
-    const syncWrap = containerEl.createDiv({ cls: "vault-sync-section vault-sync-sync-status-section" });
+    const syncWrap = root.createDiv({ cls: "vault-sync-section vault-sync-sync-status-section" });
     syncWrap.createEl("div", { cls: "vault-sync-section-label", text: "\u540C\u6B65\u72B6\u6001" });
     this.syncStatusContainerEl = syncWrap.createDiv({ cls: "vault-sync-sync-status" });
     this.fillSyncStatusSection(this.syncStatusContainerEl);
     this.syncStatusTicker = window.setInterval(() => {
       this.refreshSyncStatusPanel();
     }, 1e3);
-    const bindingBlock = containerEl.createDiv({ cls: "vault-sync-binding-card" });
+    const bindingBlock = root.createDiv({ cls: "vault-sync-binding-card" });
     new import_obsidian.Setting(bindingBlock).setName("\u8BBE\u5907\u7ED1\u5B9A\u7801").setDesc("\u7528\u4E8E\u8FDE\u63A5\u65B0\u8BBE\u5907\uFF0C\u8BF7\u59A5\u5584\u4FDD\u5B58\uFF0C\u907F\u514D\u6CC4\u9732").addButton(
       (btn) => btn.setButtonText("\u663E\u793A").onClick(() => {
         void this.onShowReveal();
@@ -18253,7 +18254,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
     this.bindingPanelEl = bindingBlock.createDiv({ cls: "vault-sync-binding-panel" });
     this.renderBindingPanel();
     let bindingInput = null;
-    const bindNewBlock = containerEl.createDiv({ cls: "vault-sync-section" });
+    const bindNewBlock = root.createDiv({ cls: "vault-sync-section vault-sync-bind-block" });
     new import_obsidian.Setting(bindNewBlock).setName("\u7ED1\u5B9A\u65B0\u8BBE\u5907").setDesc("\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u5373\u53EF\u8FDE\u63A5").addText((text) => {
       bindingInput = text.inputEl;
       text.setPlaceholder("\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801");
@@ -18288,7 +18289,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
         })();
       });
     });
-    const devBlock = containerEl.createDiv({ cls: "vault-sync-devices-block" });
+    const devBlock = root.createDiv({ cls: "vault-sync-devices-block vault-sync-section" });
     new import_obsidian.Setting(devBlock).setName("\u5DF2\u7ED1\u5B9A\u8BBE\u5907").setDesc("\u5F53\u524D\u8BBE\u5907\u4E0D\u53EF\u79FB\u9664").addButton((btn) => {
       btn.buttonEl.classList.add("mod-muted");
       btn.setButtonText("\u5237\u65B0\u5217\u8868").onClick(() => {
@@ -18297,13 +18298,13 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
     });
     this.deviceListEl = devBlock.createDiv({ cls: "vault-sync-device-list" });
     this.renderDeviceList();
-    new import_obsidian.Setting(containerEl).setName("\u81EA\u52A8\u540C\u6B65").setDesc("\u5F00\u542F\u540E\u5C06\u81EA\u52A8\u5B9A\u671F\u540C\u6B65\uFF08\u63A8\u8350\u5F00\u542F\uFF09").addToggle(
+    new import_obsidian.Setting(root).setName("\u81EA\u52A8\u540C\u6B65").setDesc("\u5F00\u542F\u540E\u5C06\u81EA\u52A8\u5B9A\u671F\u540C\u6B65\uFF08\u63A8\u8350\u5F00\u542F\uFF09").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
         this.plugin.settings.enableSync = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("\u624B\u52A8\u540C\u6B65").setDesc("\u7ACB\u5373\u6267\u884C\u4E00\u6B21\u540C\u6B65").addButton((btn) => {
+    new import_obsidian.Setting(root).setName("\u624B\u52A8\u540C\u6B65").setDesc("\u7ACB\u5373\u6267\u884C\u4E00\u6B21\u540C\u6B65").addButton((btn) => {
       btn.setButtonText("\u7ACB\u5373\u540C\u6B65");
       btn.onClick(() => {
         void (async () => {
@@ -18330,14 +18331,10 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
         })();
       });
     });
-    const advanced = containerEl.createEl("details", { cls: "vault-sync-advanced" });
+    const advanced = root.createEl("details", { cls: "vault-sync-advanced" });
     advanced.createEl("summary", { text: "\u9AD8\u7EA7\u8BBE\u7F6E" });
-    advanced.createEl("div", {
-      cls: "setting-item-description vault-sync-advanced-hint",
-      text: "\u4EC5\u5728\u9700\u8981\u65F6\u4FEE\u6539"
-    });
     const advBody = advanced.createDiv({ cls: "vault-sync-advanced-body" });
-    new import_obsidian.Setting(advBody).setName("\u670D\u52A1\u5668\u5730\u5740").setDesc("\u7559\u7A7A\u5C06\u4F7F\u7528\u9ED8\u8BA4\u670D\u52A1\u5668").addText(
+    new import_obsidian.Setting(advBody).setName("\u670D\u52A1\u5668\u5730\u5740").setDesc("\u7559\u7A7A\u5C06\u4F7F\u7528\u9ED8\u8BA4\u670D\u52A1\u5668\n\u4EC5\u5728\u9700\u8981\u65F6\u4FEE\u6539").addText(
       (text) => text.setPlaceholder(BUILTIN_DEFAULT_SERVER_URL).setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
         this.plugin.settings.serverUrl = value.trim() || BUILTIN_DEFAULT_SERVER_URL;
         await this.plugin.saveSettings();
