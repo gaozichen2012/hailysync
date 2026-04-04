@@ -17634,6 +17634,7 @@ function isDeviceRevokedError(err) {
 function isNetworkError(err) {
   if (!isAxiosError2(err)) return false;
   if (err.code === "ECONNABORTED") return true;
+  if (typeof err.message === "string" && /timeout/i.test(err.message)) return true;
   if (!err.response) return true;
   return false;
 }
@@ -17715,9 +17716,13 @@ function assertDownloadWireResponse(data, contentType) {
     if (head[i] !== magic[i]) throw new Error("\u4E0B\u8F7D\u4F53\u4E0D\u662F\u6709\u6548\u5BC6\u6587 wire\uFF08\u9B54\u6570\u4E0D\u5339\u914D\uFF09");
   }
 }
+var HTTP_TIMEOUT_MS = 12e3;
+var HTTP_TRANSFER_TIMEOUT_MS = 12e4;
+var AXIOS_TIMEOUT_DEFAULTS = { timeout: HTTP_TIMEOUT_MS };
 var AXIOS_LARGE_FILE_DEFAULTS = {
   maxBodyLength: Infinity,
-  maxContentLength: Infinity
+  maxContentLength: Infinity,
+  timeout: HTTP_TRANSFER_TIMEOUT_MS
 };
 function formatSyncError(err) {
   if (isAxiosError2(err)) {
@@ -17778,7 +17783,7 @@ function formatSyncError(err) {
   if (err instanceof Error && err.message) return err.message;
   return String(err);
 }
-var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
+var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
   plugin;
   maskedBindingText = "";
   revealedFullCode = null;
@@ -17795,15 +17800,14 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   devicesLoading = false;
   /** 点击「显示」后的提示文案 */
   revealHint = null;
-  guideSyncTicker = null;
-  guideContainerEl = null;
+  syncStatusTicker = null;
   syncStatusContainerEl = null;
   debugIdentityEl = null;
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
     this.plugin.register(() => this.clearBindingTimers());
-    this.plugin.register(() => this.clearGuideTicker());
+    this.plugin.register(() => this.clearSyncStatusTicker());
   }
   clearBindingTimers() {
     if (this.bindingCountdownInterval != null) {
@@ -17819,15 +17823,14 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       this.bindingCopyFeedbackTimeout = null;
     }
   }
-  clearGuideTicker() {
-    if (this.guideSyncTicker != null) {
-      window.clearInterval(this.guideSyncTicker);
-      this.guideSyncTicker = null;
+  clearSyncStatusTicker() {
+    if (this.syncStatusTicker != null) {
+      window.clearInterval(this.syncStatusTicker);
+      this.syncStatusTicker = null;
     }
   }
   hide() {
-    this.clearGuideTicker();
-    this.guideContainerEl = null;
+    this.clearSyncStatusTicker();
     this.syncStatusContainerEl = null;
     this.debugIdentityEl = null;
   }
@@ -17845,104 +17848,59 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     });
     el.createEl("div", {
       cls: "setting-item-description",
-      text: `\u5F53\u524D\u4F7F\u7528\u7684\u670D\u52A1\u5668\uFF1A${this.plugin.baseUrl}`
+      text: `\u5F53\u524D\u670D\u52A1\u5668\u5730\u5740\uFF1A${this.plugin.baseUrl || "\u2014"}`
     });
   }
-  refreshGuideAndSyncPanels() {
-    if (this.guideContainerEl) this.fillGuideSection(this.guideContainerEl);
+  refreshSyncStatusPanel() {
     if (this.syncStatusContainerEl) this.fillSyncStatusSection(this.syncStatusContainerEl);
-  }
-  fillGuideSection(el) {
-    el.empty();
-    const st = this.plugin.connectionState;
-    const wasRevoked = this.plugin.wasRevoked;
-    if (wasRevoked) {
-      el.createEl("div", {
-        cls: "vault-sync-guide-title",
-        text: "\u5F53\u524D\u8BBE\u5907\u5DF2\u5931\u53BB\u540C\u6B65\u8D44\u683C\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5"
-      });
-      return;
-    }
-    if (st === "awaiting_bind") {
-      el.createEl("div", {
-        cls: "vault-sync-guide-title",
-        text: "\u8BF7\u5728\u4E0B\u65B9\u300C\u7ED1\u5B9A\u65B0\u8BBE\u5907\u300D\u4E2D\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\uFF0C\u4EE5\u8FDE\u63A5\u5E76\u5F00\u59CB\u540C\u6B65\u3002"
-      });
-      return;
-    }
-    if (st === "initializing") {
-      el.createEl("div", { cls: "vault-sync-guide-title", text: "\u6B63\u5728\u521D\u59CB\u5316\u8BBE\u5907\u2026" });
-      return;
-    }
-    if (st === "connected" && this.plugin.deviceId) {
-      if (this.devicesLoading) {
-        el.createEl("div", { cls: "vault-sync-guide-title", text: "\u6B63\u5728\u52A0\u8F7D\u8BBE\u5907\u4FE1\u606F\u2026" });
-        return;
-      }
-      if (this.devices.length >= 2) {
-        el.createEl("div", { cls: "vault-sync-guide-title", text: "\u540C\u6B65\u5DF2\u6B63\u5E38\u8FD0\u884C" });
-        if (this.plugin.lastSyncAt != null) {
-          el.createEl("div", {
-            cls: "vault-sync-guide-meta",
-            text: `\u6700\u8FD1\u540C\u6B65\uFF1A${formatRelativeTimeShort(this.plugin.lastSyncAt)}`
-          });
-        }
-        return;
-      }
-      el.createEl("div", {
-        cls: "vault-sync-guide-title",
-        text: "\u4E0B\u4E00\u6B65\uFF1A\u5728\u53E6\u4E00\u53F0\u8BBE\u5907\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u5B8C\u6210\u540C\u6B65"
-      });
-      el.createEl("div", {
-        cls: "vault-sync-guide-sub",
-        text: "\u8BF7\u5728\u53E6\u4E00\u53F0\u8BBE\u5907\u6253\u5F00\u63D2\u4EF6\uFF0C\u5E76\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDB\u884C\u8FDE\u63A5\u3002"
-      });
-      const btnRow = el.createDiv({ cls: "vault-sync-guide-actions" });
-      const btn = btnRow.createEl("button", {
-        cls: "mod-cta",
-        text: "\u590D\u5236\u8BBE\u5907\u7ED1\u5B9A\u7801"
-      });
-      btn.type = "button";
-      btn.addEventListener("click", () => {
-        void this.copyFullBindingCode();
-      });
-      return;
-    }
-    el.createEl("div", { cls: "vault-sync-guide-title", text: "\u8BF7\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u7ED1\u5B9A\u3002" });
   }
   fillSyncStatusSection(el) {
     el.empty();
     const wasRevoked = this.plugin.wasRevoked;
     const syncing = this.plugin.isSyncing;
+    const st = this.plugin.connectionState;
     if (wasRevoked) {
-      el.createEl("div", { cls: "vault-sync-status-line", text: "\u540C\u6B65\u72B6\u6001\uFF1A\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664" });
+      el.createEl("div", { cls: "vault-sync-status-line", text: "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664" });
       el.createEl("div", {
         cls: "setting-item-description",
-        text: "\u8BF7\u5728\u4E0B\u65B9\u300C\u7ED1\u5B9A\u65B0\u8BBE\u5907\u300D\u4E2D\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u540C\u6B65\u3002"
+        text: "\u8BF7\u5728\u4E0B\u65B9\u300C\u7ED1\u5B9A\u65B0\u8BBE\u5907\u300D\u4E2D\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u540C\u6B65\u3002"
       });
       return;
     }
-    if (this.plugin.connectionState === "initializing") {
-      el.createEl("div", { cls: "vault-sync-status-line", text: "\u540C\u6B65\u72B6\u6001\uFF1A\u6B63\u5728\u521D\u59CB\u5316\u2026" });
-      return;
-    }
-    if (this.plugin.connectionState === "awaiting_bind" || !this.plugin.deviceId) {
-      el.createEl("div", { cls: "vault-sync-status-line", text: "\u540C\u6B65\u72B6\u6001\uFF1A\u672A\u8FDE\u63A5" });
+    if (st === "awaiting_bind") {
+      el.createEl("div", { cls: "vault-sync-status-line", text: "\u672A\u8FDE\u63A5" });
       el.createEl("div", {
         cls: "setting-item-description",
-        text: "\u5B8C\u6210\u8BBE\u5907\u7ED1\u5B9A\u540E\u5373\u53EF\u540C\u6B65\u7B14\u8BB0\u3002"
+        text: "\u8BF7\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u8FDE\u63A5\u5E76\u5F00\u59CB\u540C\u6B65\u3002"
+      });
+      return;
+    }
+    if (st === "initializing") {
+      el.createEl("div", { cls: "vault-sync-status-line", text: "\u6B63\u5728\u521D\u59CB\u5316\u2026" });
+      return;
+    }
+    if (!this.plugin.deviceId) {
+      el.createEl("div", { cls: "vault-sync-status-line", text: "\u672A\u8FDE\u63A5" });
+      el.createEl("div", {
+        cls: "setting-item-description",
+        text: "\u5B8C\u6210\u8BBE\u5907\u7ED1\u5B9A\u540E\u5373\u53EF\u5F00\u59CB\u540C\u6B65\u3002"
       });
       return;
     }
     if (syncing) {
-      el.createEl("div", { cls: "vault-sync-status-line", text: "\u540C\u6B65\u72B6\u6001\uFF1A\u540C\u6B65\u4E2D\u2026" });
+      el.createEl("div", { cls: "vault-sync-status-line", text: "\u6B63\u5728\u540C\u6B65\u2026" });
+      if (this.plugin.lastSyncAt != null) {
+        el.createEl("div", {
+          cls: "setting-item-description",
+          text: `\u6700\u8FD1\u540C\u6B65\uFF1A${formatRelativeTimeShort(this.plugin.lastSyncAt)}`
+        });
+      }
       return;
     }
     if (this.plugin.lastSyncError) {
-      el.createEl("div", { cls: "vault-sync-status-line", text: "\u540C\u6B65\u72B6\u6001\uFF1A\u540C\u6B65\u5931\u8D25" });
       el.createEl("div", {
-        cls: "vault-sync-binding-error",
-        text: `\u539F\u56E0\uFF1A${this.plugin.lastSyncError}`
+        cls: "vault-sync-status-line",
+        text: "\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5"
       });
       if (this.plugin.lastSyncAt != null) {
         el.createEl("div", {
@@ -17952,7 +17910,11 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       }
       return;
     }
-    el.createEl("div", { cls: "vault-sync-status-line", text: "\u540C\u6B65\u72B6\u6001\uFF1A\u5DF2\u8FDE\u63A5" });
+    if (this.devicesLoading) {
+      el.createEl("div", { cls: "vault-sync-status-line", text: "\u6B63\u5728\u52A0\u8F7D\u8BBE\u5907\u4FE1\u606F\u2026" });
+      return;
+    }
+    el.createEl("div", { cls: "vault-sync-status-line", text: "\u540C\u6B65\u8FD0\u884C\u6B63\u5E38" });
     if (this.plugin.lastSyncAt != null) {
       el.createEl("div", {
         cls: "setting-item-description",
@@ -17962,6 +17924,21 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       el.createEl("div", {
         cls: "setting-item-description",
         text: "\u6700\u8FD1\u540C\u6B65\uFF1A\u5C1A\u672A\u5B8C\u6210\u9996\u6B21\u540C\u6B65"
+      });
+    }
+    if (this.devices.length < 2) {
+      el.createEl("div", {
+        cls: "vault-sync-guide-sub",
+        text: "\u5728\u53E6\u4E00\u53F0\u8BBE\u5907\u6253\u5F00\u672C\u63D2\u4EF6\u5E76\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\uFF0C\u5373\u53EF\u6DFB\u52A0\u8BBE\u5907\u3002"
+      });
+      const btnRow = el.createDiv({ cls: "vault-sync-guide-actions" });
+      const btn = btnRow.createEl("button", {
+        cls: "mod-cta",
+        text: "\u590D\u5236\u8BBE\u5907\u7ED1\u5B9A\u7801"
+      });
+      btn.type = "button";
+      btn.addEventListener("click", () => {
+        void this.copyFullBindingCode();
       });
     }
   }
@@ -18009,7 +17986,7 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       });
     } else {
       const maskedWrap = panel.createDiv({ cls: "vault-sync-binding-masked-wrap" });
-      maskedWrap.createSpan({ cls: "vault-sync-binding-code-label", text: "\u8BBE\u5907\u7ED1\u5B9A\u7801\uFF08\u8131\u654F\uFF09" });
+      maskedWrap.createSpan({ cls: "vault-sync-binding-code-label", text: "\u8BBE\u5907\u7ED1\u5B9A\u7801" });
       maskedWrap.createDiv({
         cls: "vault-sync-binding-code vault-sync-binding-code-masked",
         text: this.maskedBindingText || "\u2014"
@@ -18052,14 +18029,14 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   }
   async onShowReveal() {
     if (!this.plugin.deviceId) {
-      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u7ED1\u5B9A");
+      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8FDE\u63A5\u540E\u518D\u8BD5");
       return;
     }
     this.clearBindingTimers();
     this.bindingError = null;
     const code = await this.plugin.fetchBindingCodeRaw();
     if (!code) {
-      this.bindingError = "\u65E0\u6CD5\u83B7\u53D6\u7ED1\u5B9A\u7801";
+      this.bindingError = "\u6682\u65F6\u65E0\u6CD5\u83B7\u53D6\u7ED1\u5B9A\u7801\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5";
       this.renderBindingPanel();
       return;
     }
@@ -18071,18 +18048,19 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   }
   async copyFullBindingCode() {
     if (!this.plugin.deviceId) {
-      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u7ED1\u5B9A");
+      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8FDE\u63A5\u540E\u518D\u8BD5");
       return;
     }
     const code = await this.plugin.fetchBindingCodeRaw();
     if (!code) {
-      this.bindingError = "\u65E0\u6CD5\u83B7\u53D6\u7ED1\u5B9A\u7801";
+      this.bindingError = "\u6682\u65F6\u65E0\u6CD5\u83B7\u53D6\u7ED1\u5B9A\u7801\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5";
       this.renderBindingPanel();
       return;
     }
     try {
       await navigator.clipboard.writeText(code);
-      this.bindingCopyFeedback = "\u8BBE\u5907\u7ED1\u5B9A\u7801\u5DF2\u590D\u5236";
+      new import_obsidian.Notice("\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F");
+      this.bindingCopyFeedback = "\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F";
       if (this.bindingCopyFeedbackTimeout != null) {
         window.clearTimeout(this.bindingCopyFeedbackTimeout);
       }
@@ -18095,13 +18073,18 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       this.renderBindingPanel();
     } catch {
       this.bindingCopyFeedback = null;
-      this.bindingError = "\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u590D\u5236";
+      this.bindingError = "\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC";
       this.renderBindingPanel();
     }
   }
   async onResetBinding() {
     if (!this.plugin.deviceId) {
-      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u7ED1\u5B9A");
+      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8FDE\u63A5\u540E\u518D\u8BD5");
+      return;
+    }
+    if (!window.confirm(
+      "\u91CD\u7F6E\u540E\uFF0C\u65E7\u7684\u8BBE\u5907\u7ED1\u5B9A\u7801\u5C06\u7ACB\u5373\u5931\u6548\uFF0C\u5176\u4ED6\u8BBE\u5907\u9700\u4F7F\u7528\u65B0\u7ED1\u5B9A\u7801\u624D\u80FD\u7EE7\u7EED\u8FDE\u63A5\u3002\n\n\u786E\u5B9A\u8981\u91CD\u7F6E\u5417\uFF1F"
+    )) {
       return;
     }
     this.clearBindingTimers();
@@ -18111,9 +18094,9 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     const ok = await this.plugin.resetBindingCodeOnServer();
     if (ok) {
       await this.refreshBindingMaskOnly();
-      new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u7801\u5DF2\u91CD\u7F6E");
+      new import_obsidian.Notice("\u64CD\u4F5C\u5DF2\u5B8C\u6210");
     } else {
-      this.bindingError = "\u91CD\u7F6E\u5931\u8D25";
+      this.bindingError = "\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5";
     }
     this.renderBindingPanel();
   }
@@ -18124,7 +18107,7 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     if (!this.plugin.deviceId) {
       wrap.createEl("div", {
         cls: "setting-item-description",
-        text: "\u8BBE\u5907\u672A\u8FDE\u63A5\uFF0C\u7ED1\u5B9A\u6216\u521D\u59CB\u5316\u6210\u529F\u540E\u5373\u53EF\u7BA1\u7406\u8BBE\u5907\u5217\u8868\u3002"
+        text: "\u6682\u65E0\u5176\u4ED6\u8BBE\u5907\u8FDE\u63A5"
       });
       return;
     }
@@ -18140,7 +18123,7 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       return;
     }
     if (this.devices.length === 0) {
-      wrap.createEl("div", { cls: "setting-item-description", text: "\u6682\u65E0\u8BBE\u5907" });
+      wrap.createEl("div", { cls: "setting-item-description", text: "\u6682\u65E0\u5176\u4ED6\u8BBE\u5907\u8FDE\u63A5" });
       return;
     }
     const table = wrap.createEl("table", { cls: "vault-sync-device-table" });
@@ -18177,9 +18160,9 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         btn.type = "button";
         btn.addEventListener("click", () => {
           if (window.confirm(
-            `\u5220\u9664\u540E\uFF0C\u8BE5\u8BBE\u5907\u5C06\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65\uFF0C\u9700\u8981\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u624D\u80FD\u518D\u6B21\u8FDE\u63A5\u3002
+            `\u79FB\u9664\u540E\uFF0C\u8BE5\u8BBE\u5907\u5C06\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65\uFF0C\u9700\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u624D\u80FD\u8FDE\u63A5\u3002
 
-\u786E\u5B9A\u79FB\u9664\u300C${d.device_name || d.device_id}\u300D\u5417\uFF1F`
+\u786E\u5B9A\u79FB\u9664\u300C${d.device_name || "\u8BE5\u8BBE\u5907"}\u300D\u5417\uFF1F`
           )) {
             void this.plugin.deleteDeviceOnServer(d.device_id).then((ok) => {
               if (ok) void this.reloadDevices();
@@ -18187,15 +18170,21 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
           }
         });
       } else {
-        tdOp.createSpan({ cls: "setting-item-description", text: "\u2014" });
+        tdOp.createSpan({ cls: "setting-item-description", text: "\u4E0D\u53EF\u79FB\u9664" });
       }
+    }
+    if (sorted.length === 1) {
+      wrap.createEl("div", {
+        cls: "setting-item-description",
+        text: "\u5F53\u524D\u4EC5\u6B64\u8BBE\u5907"
+      });
     }
   }
   async reloadDevices() {
     if (!this.plugin.deviceId) {
       this.devices = [];
       this.renderDeviceList();
-      this.refreshGuideAndSyncPanels();
+      this.refreshSyncStatusPanel();
       return;
     }
     this.devicesLoading = true;
@@ -18209,13 +18198,13 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       this.devicesError = res.message;
     }
     this.renderDeviceList();
-    this.refreshGuideAndSyncPanels();
+    this.refreshSyncStatusPanel();
   }
   display() {
     const { containerEl } = this;
     containerEl.empty();
     this.clearBindingTimers();
-    this.clearGuideTicker();
+    this.clearSyncStatusTicker();
     this.bindingPanelEl = null;
     this.deviceListEl = null;
     this.bindingCopyFeedback = null;
@@ -18224,27 +18213,27 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     this.bindingError = null;
     this.devicesError = null;
     this.revealHint = null;
-    this.guideContainerEl = null;
     this.syncStatusContainerEl = null;
     this.debugIdentityEl = null;
-    containerEl.createEl("h2", { text: "\u7B14\u8BB0\u540C\u6B65" });
-    const guideWrap = containerEl.createDiv({ cls: "vault-sync-section vault-sync-guide-section" });
-    guideWrap.createEl("div", { cls: "vault-sync-section-label", text: "\u4E0B\u4E00\u6B65" });
-    this.guideContainerEl = guideWrap.createDiv({ cls: "vault-sync-guide" });
-    this.fillGuideSection(this.guideContainerEl);
+    const titleRow = containerEl.createDiv({ cls: "hailysync-settings-title" });
+    titleRow.createEl("h2", { text: "\u6D77\u72F8\u540C\u6B65" });
+    titleRow.createEl("div", {
+      cls: "setting-item-description",
+      text: "\u6D77\u72F8\u540C\u6B65\uFF08HailySync\uFF09"
+    });
     const syncWrap = containerEl.createDiv({ cls: "vault-sync-section vault-sync-sync-status-section" });
     syncWrap.createEl("div", { cls: "vault-sync-section-label", text: "\u540C\u6B65\u72B6\u6001" });
     this.syncStatusContainerEl = syncWrap.createDiv({ cls: "vault-sync-sync-status" });
     this.fillSyncStatusSection(this.syncStatusContainerEl);
-    this.guideSyncTicker = window.setInterval(() => {
-      this.refreshGuideAndSyncPanels();
+    this.syncStatusTicker = window.setInterval(() => {
+      this.refreshSyncStatusPanel();
     }, 1e3);
     const bindingBlock = containerEl.createDiv({ cls: "vault-sync-binding-card" });
     bindingBlock.createEl("div", {
       cls: "vault-sync-credential-notice",
-      text: "\u8FD9\u662F\u4F60\u8FDE\u63A5\u65B0\u8BBE\u5907\u548C\u6062\u590D\u540C\u6B65\u8EAB\u4EFD\u7684\u552F\u4E00\u51ED\u8BC1\uFF0C\u8BF7\u59A5\u5584\u4FDD\u5B58\u3002"
+      text: "\u7528\u4E8E\u8FDE\u63A5\u65B0\u8BBE\u5907\uFF0C\u8BF7\u59A5\u5584\u4FDD\u5B58\uFF0C\u907F\u514D\u6CC4\u9732"
     });
-    new import_obsidian.Setting(bindingBlock).setName("\u8BBE\u5907\u7ED1\u5B9A\u7801").setDesc("\u53EF\u663E\u793A\u5B8C\u6574\u7801\uFF0820 \u79D2\u540E\u81EA\u52A8\u9690\u85CF\uFF09\u3001\u590D\u5236\u5230\u526A\u8D34\u677F\u6216\u91CD\u7F6E\uFF1B\u91CD\u7F6E\u540E\u65E7\u7801\u5931\u6548\u3002").addButton(
+    new import_obsidian.Setting(bindingBlock).setName("\u8BBE\u5907\u7ED1\u5B9A\u7801").setDesc("\u663E\u793A\u5B8C\u6574\u7801\u7EA6 20 \u79D2\u540E\u81EA\u52A8\u9690\u85CF\uFF1B\u53EF\u968F\u65F6\u590D\u5236\u3002\u91CD\u7F6E\u4F1A\u4F7F\u65E7\u7801\u5931\u6548\uFF0C\u8BF7\u8C28\u614E\u64CD\u4F5C\u3002").addButton(
       (btn) => btn.setButtonText("\u663E\u793A").onClick(() => {
         void this.onShowReveal();
       })
@@ -18253,7 +18242,7 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         void this.copyFullBindingCode();
       })
     ).addButton(
-      (btn) => btn.setButtonText("\u91CD\u7F6E").onClick(() => {
+      (btn) => btn.setButtonText("\u91CD\u7F6E").setWarning().onClick(() => {
         void this.onResetBinding();
       })
     );
@@ -18261,19 +18250,38 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     this.renderBindingPanel();
     let bindingInput = null;
     const bindNewBlock = containerEl.createDiv({ cls: "vault-sync-section" });
-    new import_obsidian.Setting(bindNewBlock).setName("\u7ED1\u5B9A\u65B0\u8BBE\u5907").setDesc("\u5728\u65B0\u8BBE\u5907\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u5373\u53EF\u8FDE\u63A5\u5E76\u5F00\u59CB\u540C\u6B65\u3002").addText((text) => {
+    new import_obsidian.Setting(bindNewBlock).setName("\u7ED1\u5B9A\u65B0\u8BBE\u5907").setDesc("\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u5373\u53EF\u8FDE\u63A5").addText((text) => {
       bindingInput = text.inputEl;
       text.setPlaceholder("\u8BF7\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801");
-    }).addButton(
-      (btn) => btn.setButtonText("\u7ED1\u5B9A\u8BBE\u5907").onClick(() => {
+    }).addButton((btn) => {
+      btn.setButtonText("\u8FDE\u63A5\u8BBE\u5907");
+      btn.onClick(() => {
         const code = bindingInput?.value?.trim() ?? "";
-        void this.plugin.bindWithCode(code).then((ok) => {
-          if (ok) this.display();
-        });
-      })
-    );
+        if (!code) {
+          new import_obsidian.Notice("\u8BF7\u5148\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801");
+          return;
+        }
+        void (async () => {
+          let reopened = false;
+          btn.setButtonText("\u8FDE\u63A5\u4E2D\u2026");
+          btn.setDisabled(true);
+          try {
+            const ok = await this.plugin.bindWithCode(code);
+            if (ok) {
+              reopened = true;
+              this.display();
+            }
+          } finally {
+            if (!reopened) {
+              btn.setDisabled(false);
+              btn.setButtonText("\u8FDE\u63A5\u8BBE\u5907");
+            }
+          }
+        })();
+      });
+    });
     const devBlock = containerEl.createDiv({ cls: "vault-sync-devices-block" });
-    new import_obsidian.Setting(devBlock).setName("\u5DF2\u7ED1\u5B9A\u8BBE\u5907").setDesc("\u5F53\u524D\u8BBE\u5907\u65E0\u6CD5\u5220\u9664\uFF1B\u53EF\u4ECE\u5217\u8868\u4E2D\u79FB\u9664\u5176\u4ED6\u8BBE\u5907\u3002").addButton((btn) => {
+    new import_obsidian.Setting(devBlock).setName("\u5DF2\u7ED1\u5B9A\u8BBE\u5907").setDesc("\u5F53\u524D\u8BBE\u5907\u4E0D\u53EF\u79FB\u9664").addButton((btn) => {
       btn.buttonEl.classList.add("mod-muted");
       btn.setButtonText("\u5237\u65B0\u5217\u8868").onClick(() => {
         void this.reloadDevices();
@@ -18281,35 +18289,62 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     });
     this.deviceListEl = devBlock.createDiv({ cls: "vault-sync-device-list" });
     this.renderDeviceList();
-    new import_obsidian.Setting(containerEl).setName("\u81EA\u52A8\u540C\u6B65").setDesc("\u5F00\u542F\u540E\u5C06\u6BCF 60 \u79D2\u81EA\u52A8\u540C\u6B65\u4E00\u6B21\u3002").addToggle(
+    new import_obsidian.Setting(containerEl).setName("\u81EA\u52A8\u540C\u6B65").setDesc("\u5F00\u542F\u540E\u5C06\u81EA\u52A8\u5B9A\u671F\u540C\u6B65\uFF08\u63A8\u8350\u5F00\u542F\uFF09").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
         this.plugin.settings.enableSync = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("\u624B\u52A8\u540C\u6B65").setDesc("\u7ACB\u5373\u6267\u884C\u4E00\u6B21\u540C\u6B65\u3002").addButton(
-      (btn) => btn.setButtonText("\u7ACB\u5373\u540C\u6B65").onClick(() => {
-        void this.plugin.syncNow();
-      })
-    );
+    new import_obsidian.Setting(containerEl).setName("\u624B\u52A8\u540C\u6B65").setDesc("\u7ACB\u5373\u6267\u884C\u4E00\u6B21\u540C\u6B65").addButton((btn) => {
+      btn.setButtonText("\u7ACB\u5373\u540C\u6B65");
+      btn.onClick(() => {
+        void (async () => {
+          if (this.plugin.isSyncing) {
+            new import_obsidian.Notice("\u8BF7\u7A0D\u5019\uFF0C\u4E0A\u4E00\u540C\u6B65\u5C1A\u672A\u7ED3\u675F");
+            return;
+          }
+          const idleLabel = "\u7ACB\u5373\u540C\u6B65";
+          btn.setButtonText("\u6B63\u5728\u540C\u6B65\u2026");
+          btn.setDisabled(true);
+          try {
+            await this.plugin.syncNow();
+          } finally {
+            btn.setDisabled(false);
+            if (this.plugin.lastSyncError) {
+              btn.setButtonText(idleLabel);
+            } else {
+              btn.setButtonText("\u540C\u6B65\u5B8C\u6210");
+              window.setTimeout(() => {
+                btn.setButtonText(idleLabel);
+              }, 1e3);
+            }
+          }
+        })();
+      });
+    });
     const advanced = containerEl.createEl("details", { cls: "vault-sync-advanced" });
     advanced.createEl("summary", { text: "\u9AD8\u7EA7\u8BBE\u7F6E" });
+    advanced.createEl("div", {
+      cls: "setting-item-description vault-sync-advanced-hint",
+      text: "\u4EC5\u5728\u9700\u8981\u65F6\u4FEE\u6539"
+    });
     const advBody = advanced.createDiv({ cls: "vault-sync-advanced-body" });
-    new import_obsidian.Setting(advBody).setName("\u670D\u52A1\u5668\u5730\u5740").setDesc("\u7559\u7A7A\u5219\u4F7F\u7528\u9ED8\u8BA4\u670D\u52A1\u5668\u5730\u5740\u3002").addText(
+    new import_obsidian.Setting(advBody).setName("\u670D\u52A1\u5668\u5730\u5740").setDesc("\u7559\u7A7A\u5C06\u4F7F\u7528\u9ED8\u8BA4\u670D\u52A1\u5668").addText(
       (text) => text.setPlaceholder(BUILTIN_DEFAULT_SERVER_URL).setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
         this.plugin.settings.serverUrl = value.trim() || BUILTIN_DEFAULT_SERVER_URL;
         await this.plugin.saveSettings();
       })
     );
-    const debugBlock = advBody.createDiv({ cls: "vault-sync-debug-block" });
-    debugBlock.createEl("div", {
-      cls: "setting-item-description",
-      text: "\u8C03\u8BD5\u4FE1\u606F\uFF08\u7528\u4E8E\u6392\u67E5\u8FDE\u63A5\u95EE\u9898\uFF09"
+    const debugDetails = advBody.createEl("details", { cls: "vault-sync-debug-details" });
+    debugDetails.createEl("summary", { text: "\u8C03\u8BD5\u4FE1\u606F\uFF08\u5C55\u5F00\uFF09" });
+    this.debugIdentityEl = debugDetails.createDiv({ cls: "vault-sync-debug-identity" });
+    debugDetails.addEventListener("toggle", () => {
+      if (debugDetails.open) {
+        this.fillDebugIdentity();
+      }
     });
-    this.debugIdentityEl = debugBlock.createDiv({ cls: "vault-sync-debug-identity" });
     void this.plugin.ensureDeviceIdentity().then(async () => {
-      this.refreshGuideAndSyncPanels();
-      this.fillDebugIdentity();
+      this.refreshSyncStatusPanel();
       if (this.plugin.connectionState === "connected" && this.plugin.deviceId) {
         await this.refreshBindingMaskOnly();
         this.renderBindingPanel();
@@ -18319,6 +18354,7 @@ var VaultSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   }
 };
 var SYNC_STATUS_RESULT_MS = 3500;
+var SYNC_COOLDOWN_MS = 2e3;
 var AUTO_SYNC_INTERVAL_MS = 6e4;
 var AUTO_SYNC_START_MIN_MS = 2e3;
 var AUTO_SYNC_START_MAX_MS = 5e3;
@@ -18338,6 +18374,8 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   /** 最近一次同步失败原因（成功同步后清空） */
   lastSyncError = null;
   syncRunning = false;
+  /** 自动同步与手动同步紧挨着结束时，短暂冷却避免并发重叠 */
+  syncCooldownUntil = 0;
   get isSyncing() {
     return this.syncRunning;
   }
@@ -18345,17 +18383,40 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   statusResultTimer = null;
   autoSyncStartupTimerId = null;
   async onload() {
-    await this.loadSettings();
-    await this.ensureDeviceIdentity();
-    this.initSyncStatusBar();
-    this.addSettingTab(new VaultSyncSettingTab(this.app, this));
-    this.addCommand({
-      id: "sync-now",
-      name: "\u7ACB\u5373\u540C\u6B65",
-      callback: () => {
-        void this.syncNow();
+    try {
+      await this.loadSettings();
+      await this.ensureDeviceIdentity();
+    } catch (e) {
+      console.error("[HailySync] onload init failed", e);
+      try {
+        this.settings = Object.assign({}, DEFAULT_SETTINGS);
+      } catch {
       }
-    });
+      this.connectionState = "awaiting_bind";
+      this.userId = "";
+      this.deviceId = "";
+    }
+    try {
+      this.initSyncStatusBar();
+    } catch (e) {
+      console.error("[HailySync] status bar init failed", e);
+    }
+    try {
+      this.addSettingTab(new HailySyncSettingTab(this.app, this));
+    } catch (e) {
+      console.error("[HailySync] addSettingTab failed", e);
+    }
+    try {
+      this.addCommand({
+        id: "hailysync-sync-now",
+        name: "\u7ACB\u5373\u540C\u6B65",
+        callback: () => {
+          void this.syncNow();
+        }
+      });
+    } catch (e) {
+      console.error("[HailySync] addCommand failed", e);
+    }
     const startupDelay = AUTO_SYNC_START_MIN_MS + Math.floor(Math.random() * (AUTO_SYNC_START_MAX_MS - AUTO_SYNC_START_MIN_MS + 1));
     this.autoSyncStartupTimerId = window.setTimeout(() => {
       this.autoSyncStartupTimerId = null;
@@ -18396,15 +18457,15 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   setSyncStatusIdle() {
     this.clearStatusResultTimer();
-    this.setSyncStatusText("\u{1F7E2} Sync Idle");
+    this.setSyncStatusText("\u540C\u6B65\u8FD0\u884C\u6B63\u5E38");
   }
   setSyncStatusSyncing() {
     this.clearStatusResultTimer();
-    this.setSyncStatusText("\u{1F504} Syncing...");
+    this.setSyncStatusText("\u6B63\u5728\u540C\u6B65\u2026");
   }
   setSyncStatusSuccess() {
     this.clearStatusResultTimer();
-    this.setSyncStatusText("\u2714 Synced");
+    this.setSyncStatusText("\u540C\u6B65\u5B8C\u6210");
     this.statusResultTimer = window.setTimeout(() => {
       this.statusResultTimer = null;
       this.setSyncStatusIdle();
@@ -18412,14 +18473,20 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   setSyncStatusFailed() {
     this.clearStatusResultTimer();
-    this.setSyncStatusText("\u274C Sync Failed");
+    this.setSyncStatusText("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5");
     this.statusResultTimer = window.setTimeout(() => {
       this.statusResultTimer = null;
       this.setSyncStatusIdle();
     }, SYNC_STATUS_RESULT_MS);
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    let loaded = {};
+    try {
+      loaded = await this.loadData();
+    } catch (e) {
+      console.error("[HailySync] loadData failed", e);
+    }
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
     if (typeof this.settings.enableSync !== "boolean") {
       this.settings.enableSync = DEFAULT_SETTINGS.enableSync;
     }
@@ -18433,13 +18500,17 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     await this.saveData(this.settings);
   }
   get baseUrl() {
-    return this.settings.serverUrl.trim().replace(/\/+$/, "");
+    const raw = this.settings?.serverUrl;
+    const s = typeof raw === "string" ? raw.trim() : "";
+    const u = s || BUILTIN_DEFAULT_SERVER_URL;
+    return u.replace(/\/+$/, "");
   }
   /** 除 POST /api/init、POST /api/bind 外所有 sync API 使用 */
   syncApiHeaders() {
-    if (!this.deviceId) return {};
+    const id = typeof this.deviceId === "string" ? this.deviceId.trim() : "";
+    if (!id) return {};
     return {
-      "X-Device-Id": this.deviceId,
+      "X-Device-Id": id,
       "X-HailySync-Protocol": "1"
     };
   }
@@ -18514,7 +18585,8 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   /** GET /api/vault/envelope（与冻结协议字段一致） */
   async fetchVaultEnvelope() {
     const res = await axios_default.get(`${this.baseUrl}/api/vault/envelope`, {
-      headers: this.syncApiHeaders()
+      headers: this.syncApiHeaders(),
+      ...AXIOS_TIMEOUT_DEFAULTS
     });
     if (!isPlainObjectRecord(res.data)) {
       throw new Error("GET /api/vault/envelope \u54CD\u5E94\u975E\u6CD5");
@@ -18624,7 +18696,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           SYNC_CONFIG_FILENAME,
           JSON.stringify({ pending_bind: true }, null, 2)
         );
-        new import_obsidian.Notice("\u68C0\u6D4B\u5230\u65E7\u7248\u4EC5 user_id \u7684\u914D\u7F6E\uFF0C\u8BF7\u8F93\u5165\u7ED1\u5B9A\u7801\u5B8C\u6210\u8BBE\u5907\u7ED1\u5B9A", 12e3);
+        new import_obsidian.Notice("\u8BF7\u5148\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801", 12e3);
         return;
       }
     } catch {
@@ -18636,25 +18708,29 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     const server = this.baseUrl;
     if (!server) {
       this.connectionState = "awaiting_bind";
-      new import_obsidian.Notice("\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740");
+      new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
       return;
     }
     try {
-      const res = await axios_default.post(`${server}/api/init`, {
-        device_name: getDeviceDisplayName(),
-        device_type: getDeviceTypeLabel()
-      });
+      const res = await axios_default.post(
+        `${server}/api/init`,
+        {
+          device_name: getDeviceDisplayName(),
+          device_type: getDeviceTypeLabel()
+        },
+        { ...AXIOS_TIMEOUT_DEFAULTS }
+      );
       const uid = res.data?.user_id;
       const did = res.data?.device_id;
       const bindingCode = res.data?.binding_code;
       if (typeof uid !== "string" || !uid.trim() || typeof did !== "string" || !did.trim()) {
         this.connectionState = "awaiting_bind";
-        new import_obsidian.Notice("\u521D\u59CB\u5316\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE user_id / device_id");
+        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5");
         return;
       }
       if (typeof bindingCode !== "string" || !bindingCode.trim()) {
         this.connectionState = "awaiting_bind";
-        new import_obsidian.Notice("\u521D\u59CB\u5316\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE binding_code");
+        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5");
         return;
       }
       try {
@@ -18669,18 +18745,15 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           SYNC_CONFIG_FILENAME,
           JSON.stringify({ pending_bind: true }, null, 2)
         );
-        new import_obsidian.Notice(
-          "Vault \u5BC6\u94A5\u5305\u4E0A\u4F20\u5931\u8D25\uFF0C\u5DF2\u56DE\u6EDA\u672C\u5730\u8BBE\u5907\u914D\u7F6E\uFF1A" + formatSyncError(e),
-          12e3
-        );
+        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 12e3);
         return;
       }
     } catch (e) {
       this.connectionState = "awaiting_bind";
       if (isNetworkError(e)) {
-        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
       } else {
-        new import_obsidian.Notice("\u521D\u59CB\u5316\u5931\u8D25\uFF1A" + formatSyncError(e));
+        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5");
       }
     }
   }
@@ -18731,17 +18804,18 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     if (!server) return null;
     try {
       const res = await axios_default.get(`${server}/api/binding-code`, {
-        headers: this.syncApiHeaders()
+        headers: this.syncApiHeaders(),
+        ...AXIOS_TIMEOUT_DEFAULTS
       });
       return extractBindingCodeFromJson(res.data);
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
         return null;
       }
       if (isNetworkError(e)) {
-        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
         return null;
       }
       return null;
@@ -18752,38 +18826,41 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     const server = this.baseUrl;
     if (!server) return false;
     try {
-      await axios_default.post(`${server}/api/binding-code/reset`, {}, { headers: this.syncApiHeaders() });
+      await axios_default.post(
+        `${server}/api/binding-code/reset`,
+        {},
+        { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS }
+      );
       return true;
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
         return false;
       }
       if (isNetworkError(e)) {
-        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
         return false;
       }
       return false;
     }
   }
   async fetchDevicesList() {
-    if (!this.deviceId) return { ok: false, message: "\u65E0\u6548\u7684\u8BBE\u5907" };
+    if (!this.deviceId) return { ok: true, devices: [] };
     try {
       const res = await axios_default.get(`${this.baseUrl}/api/devices`, {
-        headers: this.syncApiHeaders()
+        headers: this.syncApiHeaders(),
+        ...AXIOS_TIMEOUT_DEFAULTS
       });
       const devices = parseDevicesListPayload(res.data);
       return { ok: true, devices };
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        return { ok: false, message: "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664" };
+        return { ok: false, message: "\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5" };
       }
-      if (isNetworkError(e)) {
-        return { ok: false, message: "\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5" };
-      }
-      return { ok: false, message: formatSyncError(e) };
+      console.error("[HailySync] fetchDevicesList failed", e);
+      return { ok: true, devices: [] };
     }
   }
   async deleteDeviceOnServer(targetId) {
@@ -18794,41 +18871,45 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       await axios_default.post(
         `${server}/api/device/delete`,
         { device_id: targetId },
-        { headers: this.syncApiHeaders() }
+        { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS }
       );
-      new import_obsidian.Notice("\u5DF2\u5220\u9664\u8BBE\u5907");
+      new import_obsidian.Notice("\u64CD\u4F5C\u5DF2\u5B8C\u6210");
       return true;
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
         return false;
       }
       if (isNetworkError(e)) {
-        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
         return false;
       }
-      new import_obsidian.Notice("\u5220\u9664\u5931\u8D25\uFF1A" + formatSyncError(e));
+      new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5");
       return false;
     }
   }
   async bindWithCode(raw) {
     const code = raw.trim();
     if (!code) {
-      new import_obsidian.Notice("\u8BF7\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801");
+      new import_obsidian.Notice("\u8BF7\u5148\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801");
       return false;
     }
     const server = this.baseUrl;
     if (!server) {
-      new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A\u8BF7\u5148\u5728\u9AD8\u7EA7\u8BBE\u7F6E\u4E2D\u586B\u5199\u6709\u6548\u7684\u670D\u52A1\u5668\u5730\u5740", 6e3);
+      new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC", 6e3);
       return false;
     }
     try {
-      const res = await axios_default.post(`${server}/api/bind`, {
-        binding_code: code,
-        device_name: getDeviceDisplayName(),
-        device_type: getDeviceTypeLabel()
-      });
+      const res = await axios_default.post(
+        `${server}/api/bind`,
+        {
+          binding_code: code,
+          device_name: getDeviceDisplayName(),
+          device_type: getDeviceTypeLabel()
+        },
+        { ...AXIOS_TIMEOUT_DEFAULTS }
+      );
       const uid = res.data?.user_id;
       const did = res.data?.device_id;
       const kekSalt = res.data?.kek_salt;
@@ -18836,11 +18917,11 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       const vkv = res.data?.vault_key_version;
       const envelope = res.data?.envelope;
       if (typeof uid !== "string" || !uid.trim() || typeof did !== "string" || !did.trim()) {
-        new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6709\u6548\u4FE1\u606F\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5", 6e3);
+        new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u7ED1\u5B9A\u7801\u6B63\u786E", 6e3);
         return false;
       }
       if (typeof kekSalt !== "string" || typeof kekDv !== "number" || typeof vkv !== "number" || envelope == null || typeof envelope !== "object") {
-        new import_obsidian.Notice("\u7ED1\u5B9A\u5931\u8D25\uFF1A\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u5B8C\u6574 envelope / kek \u5B57\u6BB5", 8e3);
+        new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u7ED1\u5B9A\u7801\u6B63\u786E", 8e3);
         return false;
       }
       try {
@@ -18852,25 +18933,26 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         });
         await this.unlockVaultFromBindingCode(code, envelope);
       } catch (e) {
-        new import_obsidian.Notice("\u7ED1\u5B9A\u89E3\u5BC6\u5931\u8D25\uFF1A" + formatSyncError(e), 12e3);
+        console.error("[HailySync] bind unlock failed", e);
+        new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u7ED1\u5B9A\u7801\u6B63\u786E", 12e3);
         await this.wipeVaultKeyLocal();
         return false;
       }
       await this.persistFullIdentity(uid.trim(), did.trim(), code.trim());
-      new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u6210\u529F\uFF0C\u6B63\u5728\u5F00\u59CB\u540C\u6B65");
+      new import_obsidian.Notice("\u8BBE\u5907\u8FDE\u63A5\u6210\u529F\uFF0C\u5F00\u59CB\u540C\u6B65");
       void this.syncNow();
       return true;
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+        new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
         return false;
       }
       if (isNetworkError(e)) {
-        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
         return false;
       }
-      new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u7801\u65E0\u6548\u6216\u5DF2\u5931\u6548");
+      new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u7ED1\u5B9A\u7801\u6B63\u786E");
       return false;
     }
   }
@@ -18914,10 +18996,10 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   async fetchRemoteFiles() {
     const res = await axios_default.get(this.baseUrl + "/files", {
       headers: this.syncApiHeaders(),
-      responseType: "text"
+      responseType: "text",
+      ...AXIOS_TIMEOUT_DEFAULTS
     });
     const raw = res.data;
-    console.log("RAW /files response:", raw);
     if (typeof raw !== "string") {
       throw new Error("/files \u54CD\u5E94\u7C7B\u578B\u5F02\u5E38");
     }
@@ -19089,7 +19171,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         relative_path: normalized,
         updated_at
       },
-      { headers: this.syncApiHeaders() }
+      { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS }
     );
     const d = res.data;
     if (d.success !== true || d.relative_path !== normalized || typeof d.updated_at !== "number") {
@@ -19105,9 +19187,17 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
   }
   async syncNow(options) {
     const isAuto = options?.auto === true;
-    await this.ensureDeviceIdentity();
+    if (isAuto && Date.now() < this.syncCooldownUntil) {
+      return;
+    }
+    try {
+      await this.ensureDeviceIdentity();
+    } catch (e) {
+      console.error("[HailySync] ensureDeviceIdentity in syncNow", e);
+      return;
+    }
     if (this.syncRunning) {
-      new import_obsidian.Notice("\u540C\u6B65\u5DF2\u5728\u8FDB\u884C\u4E2D");
+      new import_obsidian.Notice("\u8BF7\u7A0D\u5019\uFF0C\u4E0A\u4E00\u540C\u6B65\u5C1A\u672A\u7ED3\u675F");
       return;
     }
     this.syncRunning = true;
@@ -19115,7 +19205,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       if (!this.settings.enableSync) {
         this.lastSyncError = "\u540C\u6B65\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F\u81EA\u52A8\u540C\u6B65";
         this.setSyncStatusFailed();
-        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF1A\u8BF7\u5148\u5F00\u542F\u300C\u81EA\u52A8\u540C\u6B65\u300D");
+        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5");
         if (isAuto) console.log("[auto-sync] failed");
         return;
       }
@@ -19123,7 +19213,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       if (!server) {
         this.lastSyncError = "\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740";
         this.setSyncStatusFailed();
-        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF1A\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740");
+        new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
         if (isAuto) console.log("[auto-sync] failed");
         return;
       }
@@ -19131,9 +19221,9 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         this.lastSyncError = this.wasRevoked ? "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65" : "\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u7ED1\u5B9A\u540E\u518D\u540C\u6B65";
         this.setSyncStatusFailed();
         if (this.wasRevoked) {
-          new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+          new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
         } else {
-          new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u8BBE\u5907\u521D\u59CB\u5316\u6216\u8F93\u5165\u7ED1\u5B9A\u7801\u540E\u518D\u540C\u6B65", 8e3);
+          new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u7ED1\u5B9A\u7801\u6B63\u786E", 8e3);
         }
         if (isAuto) console.log("[auto-sync] failed");
         return;
@@ -19145,24 +19235,18 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           await this.handleDeviceRevoked();
           this.lastSyncError = "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65";
           this.setSyncStatusFailed();
-          new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+          new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
           if (isAuto) console.log("[auto-sync] failed");
           return;
         }
         this.lastSyncError = formatSyncError(e);
         this.setSyncStatusFailed();
         if (e instanceof Error && e.message === "E2EE_NEED_BINDING_CODE") {
-          new import_obsidian.Notice(
-            "\u672C\u5730\u7F3A\u5C11\u52A0\u5BC6\u5BC6\u94A5\u3002\u8BF7\u5728\u8BBE\u7F6E\u300C\u7ED1\u5B9A\u65B0\u8BBE\u5907\u300D\u4E2D\u8F93\u5165\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\uFF08\u9700\u4E0E\u8BE5 vault \u6240\u7528\u7ED1\u5B9A\u7801\u4E00\u81F4\uFF09\u3002",
-            15e3
-          );
+          new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u7ED1\u5B9A\u7801\u6B63\u786E", 15e3);
         } else if (e instanceof Error && e.message === "E2EE_NEED_FIRST_SETUP") {
-          new import_obsidian.Notice(
-            "\u65E0\u6CD5\u81EA\u52A8\u6062\u590D\u52A0\u5BC6\uFF1A\u7F3A\u5C11\u7ED1\u5B9A\u7801\u5907\u4EFD\u3002\u8BF7\u4F7F\u7528\u300C\u7ED1\u5B9A\u65B0\u8BBE\u5907\u300D\u8F93\u5165\u7ED1\u5B9A\u7801\uFF0C\u6216\u5220\u9664 .sync_config.json \u540E\u91CD\u8BD5\u4EE5\u91CD\u65B0\u521D\u59CB\u5316\u3002",
-            15e3
-          );
+          new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u7ED1\u5B9A\u7801\u6B63\u786E", 15e3);
         } else {
-          new import_obsidian.Notice("\u52A0\u5BC6\u5BC6\u94A5\u4E0D\u53EF\u7528\uFF1A" + formatSyncError(e), 12e3);
+          new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 12e3);
         }
         if (isAuto) console.log("[auto-sync] failed");
         return;
@@ -19182,18 +19266,18 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           await this.handleDeviceRevoked();
           this.lastSyncError = "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65";
           this.setSyncStatusFailed();
-          new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+          new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
           if (isAuto) console.log("[auto-sync] failed");
           return;
         }
         this.setSyncStatusFailed();
         if (isNetworkError(err)) {
           this.lastSyncError = "\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5";
-          new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5", 8e3);
+          new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC", 8e3);
         } else {
           const detail = formatSyncError(err);
           this.lastSyncError = `\u65E0\u6CD5\u83B7\u53D6\u7B14\u8BB0\u5217\u8868\uFF1A${detail}`;
-          new import_obsidian.Notice(`\u540C\u6B65\u5931\u8D25\uFF1A\u65E0\u6CD5\u83B7\u53D6\u7B14\u8BB0\u5217\u8868\uFF08${detail}\uFF09`, 8e3);
+          new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 8e3);
         }
         if (isAuto) console.log("[auto-sync] failed");
         return;
@@ -19315,7 +19399,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
             await this.handleDeviceRevoked();
             this.lastSyncError = "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65";
             this.setSyncStatusFailed();
-            new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u8FDE\u63A5", 12e3);
+            new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
             if (isAuto) console.log("[auto-sync] failed");
             return;
           }
@@ -19328,7 +19412,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         const preview = stepErrors.length <= 2 ? stepErrors.join("\uFF1B") : `${stepErrors.slice(0, 2).join("\uFF1B")} \u7B49\u5171 ${stepErrors.length} \u5904`;
         this.lastSyncError = preview.length > 500 ? `${preview.slice(0, 500)}\u2026` : preview;
         this.setSyncStatusFailed();
-        new import_obsidian.Notice(`\u540C\u6B65\u5931\u8D25\uFF1A\u90E8\u5206\u6587\u4EF6\u672A\u540C\u6B65\uFF08${preview}\uFF09`, 1e4);
+        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 1e4);
         if (isAuto) console.log("[auto-sync] failed");
         return;
       }
@@ -19341,15 +19425,16 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       this.setSyncStatusFailed();
       if (isNetworkError(e)) {
         this.lastSyncError = "\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5";
-        new import_obsidian.Notice("\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5", 8e3);
+        new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC", 8e3);
       } else {
         const msg = formatSyncError(e);
         this.lastSyncError = msg;
-        new import_obsidian.Notice(`\u540C\u6B65\u5931\u8D25\uFF1A${msg}`, 8e3);
+        new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 8e3);
       }
       if (isAuto) console.log("[auto-sync] failed");
     } finally {
       this.syncRunning = false;
+      this.syncCooldownUntil = Date.now() + SYNC_COOLDOWN_MS;
     }
   }
 };

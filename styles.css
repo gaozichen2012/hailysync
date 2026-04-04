@@ -1,3 +1,7 @@
+.hailysync-settings-title h2 {
+	margin-bottom: 0.15em;
+}
+
 .vault-sync-section {
 	margin-top: 1em;
 	margin-bottom: 0.25em;
@@ -160,6 +164,26 @@
 
 .vault-sync-device-row-current {
 	background: var(--background-modifier-hover);
+	box-shadow: inset 3px 0 0 var(--interactive-accent);
+}
+
+.vault-sync-debug-details {
+	margin-top: 0.75em;
+	padding-top: 0.5em;
+	border-top: 1px dashed var(--background-modifier-border);
+}
+
+.vault-sync-debug-details > summary {
+	cursor: pointer;
+	font-weight: 500;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	padding: 0.35em 0;
+	list-style: none;
+}
+
+.vault-sync-debug-details > summary::-webkit-details-marker {
+	display: none;
 }
 
 .vault-sync-badge-current {
@@ -177,6 +201,10 @@
 .vault-sync-tag-current {
 	color: var(--text-accent);
 	font-size: var(--font-ui-smaller);
+}
+
+.vault-sync-advanced-hint {
+	margin: 0.35em 0 0.5em;
 }
 
 .vault-sync-advanced {

@@ -291,6 +291,8 @@ function isDeviceRevokedError(err: unknown): boolean {
 function isNetworkError(err: unknown): boolean {
   if (!isAxiosError(err)) return false;
   if (err.code === 'ECONNABORTED') return true;
+  /** axios 超时时 message 可能含 timeout */
+  if (typeof err.message === 'string' && /timeout/i.test(err.message)) return true;
   if (!err.response) return true;
   return false;
 }
@@ -397,9 +399,16 @@ function assertDownloadWireResponse(
   }
 }
 
+/** 常规 API 超时；大文件传输单独放宽，避免误杀上传/下载 */
+const HTTP_TIMEOUT_MS = 12_000;
+const HTTP_TRANSFER_TIMEOUT_MS = 120_000;
+
+const AXIOS_TIMEOUT_DEFAULTS = { timeout: HTTP_TIMEOUT_MS };
+
 const AXIOS_LARGE_FILE_DEFAULTS = {
   maxBodyLength: Infinity as number,
   maxContentLength: Infinity as number,
+  timeout: HTTP_TRANSFER_TIMEOUT_MS,
 };
 
 function formatSyncError(err: unknown): string {
@@ -464,7 +473,7 @@ function formatSyncError(err: unknown): string {
   return String(err);
 }
 
-class VaultSyncSettingTab extends PluginSettingTab {
+class HailySyncSettingTab extends PluginSettingTab {
   plugin: ObsidianSyncPlugin;
 
   private maskedBindingText = '';
@@ -482,8 +491,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
   private devicesLoading = false;
   /** 点击「显示」后的提示文案 */
   private revealHint: string | null = null;
-  private guideSyncTicker: number | null = null;
-  private guideContainerEl: HTMLElement | null = null;
+  private syncStatusTicker: number | null = null;
   private syncStatusContainerEl: HTMLElement | null = null;
   private debugIdentityEl: HTMLElement | null = null;
 
@@ -491,7 +499,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
     this.plugin.register(() => this.clearBindingTimers());
-    this.plugin.register(() => this.clearGuideTicker());
+    this.plugin.register(() => this.clearSyncStatusTicker());
   }
 
   private clearBindingTimers(): void {
@@ -509,16 +517,15 @@ class VaultSyncSettingTab extends PluginSettingTab {
     }
   }
 
-  private clearGuideTicker(): void {
-    if (this.guideSyncTicker != null) {
-      window.clearInterval(this.guideSyncTicker);
-      this.guideSyncTicker = null;
+  private clearSyncStatusTicker(): void {
+    if (this.syncStatusTicker != null) {
+      window.clearInterval(this.syncStatusTicker);
+      this.syncStatusTicker = null;
     }
   }
 
   hide(): void {
-    this.clearGuideTicker();
-    this.guideContainerEl = null;
+    this.clearSyncStatusTicker();
     this.syncStatusContainerEl = null;
     this.debugIdentityEl = null;
   }
@@ -537,119 +544,67 @@ class VaultSyncSettingTab extends PluginSettingTab {
     });
     el.createEl('div', {
       cls: 'setting-item-description',
-      text: `当前使用的服务器：${this.plugin.baseUrl}`,
+      text: `当前服务器地址：${this.plugin.baseUrl || '—'}`,
     });
   }
 
-  private refreshGuideAndSyncPanels(): void {
-    if (this.guideContainerEl) this.fillGuideSection(this.guideContainerEl);
+  private refreshSyncStatusPanel(): void {
     if (this.syncStatusContainerEl) this.fillSyncStatusSection(this.syncStatusContainerEl);
-  }
-
-  private fillGuideSection(el: HTMLElement): void {
-    el.empty();
-    const st = this.plugin.connectionState;
-    const wasRevoked = this.plugin.wasRevoked;
-
-    if (wasRevoked) {
-      el.createEl('div', {
-        cls: 'vault-sync-guide-title',
-        text: '当前设备已失去同步资格，请重新输入设备绑定码连接',
-      });
-      return;
-    }
-
-    if (st === 'awaiting_bind') {
-      el.createEl('div', {
-        cls: 'vault-sync-guide-title',
-        text: '请在下方「绑定新设备」中输入设备绑定码，以连接并开始同步。',
-      });
-      return;
-    }
-
-    if (st === 'initializing') {
-      el.createEl('div', { cls: 'vault-sync-guide-title', text: '正在初始化设备…' });
-      return;
-    }
-
-    if (st === 'connected' && this.plugin.deviceId) {
-      if (this.devicesLoading) {
-        el.createEl('div', { cls: 'vault-sync-guide-title', text: '正在加载设备信息…' });
-        return;
-      }
-
-      if (this.devices.length >= 2) {
-        el.createEl('div', { cls: 'vault-sync-guide-title', text: '同步已正常运行' });
-        if (this.plugin.lastSyncAt != null) {
-          el.createEl('div', {
-            cls: 'vault-sync-guide-meta',
-            text: `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`,
-          });
-        }
-        return;
-      }
-
-      el.createEl('div', {
-        cls: 'vault-sync-guide-title',
-        text: '下一步：在另一台设备输入设备绑定码完成同步',
-      });
-      el.createEl('div', {
-        cls: 'vault-sync-guide-sub',
-        text: '请在另一台设备打开插件，并输入设备绑定码进行连接。',
-      });
-      const btnRow = el.createDiv({ cls: 'vault-sync-guide-actions' });
-      const btn = btnRow.createEl('button', {
-        cls: 'mod-cta',
-        text: '复制设备绑定码',
-      });
-      btn.type = 'button';
-      btn.addEventListener('click', () => {
-        void this.copyFullBindingCode();
-      });
-      return;
-    }
-
-    el.createEl('div', { cls: 'vault-sync-guide-title', text: '请完成设备初始化或绑定。' });
   }
 
   private fillSyncStatusSection(el: HTMLElement): void {
     el.empty();
     const wasRevoked = this.plugin.wasRevoked;
     const syncing = this.plugin.isSyncing;
+    const st = this.plugin.connectionState;
 
     if (wasRevoked) {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '同步状态：当前设备已被移除' });
+      el.createEl('div', { cls: 'vault-sync-status-line', text: '当前设备已被移除' });
       el.createEl('div', {
         cls: 'setting-item-description',
-        text: '请在下方「绑定新设备」中重新输入设备绑定码以恢复同步。',
+        text: '请在下方「绑定新设备」中输入设备绑定码以恢复同步。',
       });
       return;
     }
 
-    if (this.plugin.connectionState === 'initializing') {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '同步状态：正在初始化…' });
+    if (st === 'awaiting_bind') {
+      el.createEl('div', { cls: 'vault-sync-status-line', text: '未连接' });
+      el.createEl('div', {
+        cls: 'setting-item-description',
+        text: '请输入设备绑定码以连接并开始同步。',
+      });
       return;
     }
 
-    if (this.plugin.connectionState === 'awaiting_bind' || !this.plugin.deviceId) {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '同步状态：未连接' });
+    if (st === 'initializing') {
+      el.createEl('div', { cls: 'vault-sync-status-line', text: '正在初始化…' });
+      return;
+    }
+
+    if (!this.plugin.deviceId) {
+      el.createEl('div', { cls: 'vault-sync-status-line', text: '未连接' });
       el.createEl('div', {
         cls: 'setting-item-description',
-        text: '完成设备绑定后即可同步笔记。',
+        text: '完成设备绑定后即可开始同步。',
       });
       return;
     }
 
     if (syncing) {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '同步状态：同步中…' });
+      el.createEl('div', { cls: 'vault-sync-status-line', text: '正在同步…' });
+      if (this.plugin.lastSyncAt != null) {
+        el.createEl('div', {
+          cls: 'setting-item-description',
+          text: `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`,
+        });
+      }
       return;
     }
 
     if (this.plugin.lastSyncError) {
-      el.createEl('div', { cls: 'vault-sync-status-line', text: '同步状态：同步失败' });
       el.createEl('div', {
-        cls: 'vault-sync-binding-error',
-        text: `原因：${this.plugin.lastSyncError}`,
+        cls: 'vault-sync-status-line',
+        text: '同步失败，请检查网络后重试',
       });
       if (this.plugin.lastSyncAt != null) {
         el.createEl('div', {
@@ -660,7 +615,12 @@ class VaultSyncSettingTab extends PluginSettingTab {
       return;
     }
 
-    el.createEl('div', { cls: 'vault-sync-status-line', text: '同步状态：已连接' });
+    if (this.devicesLoading) {
+      el.createEl('div', { cls: 'vault-sync-status-line', text: '正在加载设备信息…' });
+      return;
+    }
+
+    el.createEl('div', { cls: 'vault-sync-status-line', text: '同步运行正常' });
     if (this.plugin.lastSyncAt != null) {
       el.createEl('div', {
         cls: 'setting-item-description',
@@ -670,6 +630,22 @@ class VaultSyncSettingTab extends PluginSettingTab {
       el.createEl('div', {
         cls: 'setting-item-description',
         text: '最近同步：尚未完成首次同步',
+      });
+    }
+
+    if (this.devices.length < 2) {
+      el.createEl('div', {
+        cls: 'vault-sync-guide-sub',
+        text: '在另一台设备打开本插件并输入设备绑定码，即可添加设备。',
+      });
+      const btnRow = el.createDiv({ cls: 'vault-sync-guide-actions' });
+      const btn = btnRow.createEl('button', {
+        cls: 'mod-cta',
+        text: '复制设备绑定码',
+      });
+      btn.type = 'button';
+      btn.addEventListener('click', () => {
+        void this.copyFullBindingCode();
       });
     }
   }
@@ -732,7 +708,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
       });
     } else {
       const maskedWrap = panel.createDiv({ cls: 'vault-sync-binding-masked-wrap' });
-      maskedWrap.createSpan({ cls: 'vault-sync-binding-code-label', text: '设备绑定码（脱敏）' });
+      maskedWrap.createSpan({ cls: 'vault-sync-binding-code-label', text: '设备绑定码' });
       maskedWrap.createDiv({
         cls: 'vault-sync-binding-code vault-sync-binding-code-masked',
         text: this.maskedBindingText || '—',
@@ -780,14 +756,14 @@ class VaultSyncSettingTab extends PluginSettingTab {
 
   private async onShowReveal(): Promise<void> {
     if (!this.plugin.deviceId) {
-      new Notice('请先完成设备初始化或绑定');
+      new Notice('请先完成连接后再试');
       return;
     }
     this.clearBindingTimers();
     this.bindingError = null;
     const code = await this.plugin.fetchBindingCodeRaw();
     if (!code) {
-      this.bindingError = '无法获取绑定码';
+      this.bindingError = '暂时无法获取绑定码，请检查网络后重试';
       this.renderBindingPanel();
       return;
     }
@@ -800,18 +776,19 @@ class VaultSyncSettingTab extends PluginSettingTab {
 
   private async copyFullBindingCode(): Promise<void> {
     if (!this.plugin.deviceId) {
-      new Notice('请先完成设备初始化或绑定');
+      new Notice('请先完成连接后再试');
       return;
     }
     const code = await this.plugin.fetchBindingCodeRaw();
     if (!code) {
-      this.bindingError = '无法获取绑定码';
+      this.bindingError = '暂时无法获取绑定码，请检查网络后重试';
       this.renderBindingPanel();
       return;
     }
     try {
       await navigator.clipboard.writeText(code);
-      this.bindingCopyFeedback = '设备绑定码已复制';
+      new Notice('已复制到剪贴板');
+      this.bindingCopyFeedback = '已复制到剪贴板';
       if (this.bindingCopyFeedbackTimeout != null) {
         window.clearTimeout(this.bindingCopyFeedbackTimeout);
       }
@@ -824,14 +801,21 @@ class VaultSyncSettingTab extends PluginSettingTab {
       this.renderBindingPanel();
     } catch {
       this.bindingCopyFeedback = null;
-      this.bindingError = '复制失败，请手动复制';
+      this.bindingError = '连接失败，请检查网络';
       this.renderBindingPanel();
     }
   }
 
   private async onResetBinding(): Promise<void> {
     if (!this.plugin.deviceId) {
-      new Notice('请先完成设备初始化或绑定');
+      new Notice('请先完成连接后再试');
+      return;
+    }
+    if (
+      !window.confirm(
+        '重置后，旧的设备绑定码将立即失效，其他设备需使用新绑定码才能继续连接。\n\n确定要重置吗？',
+      )
+    ) {
       return;
     }
     this.clearBindingTimers();
@@ -841,9 +825,9 @@ class VaultSyncSettingTab extends PluginSettingTab {
     const ok = await this.plugin.resetBindingCodeOnServer();
     if (ok) {
       await this.refreshBindingMaskOnly();
-      new Notice('设备绑定码已重置');
+      new Notice('操作已完成');
     } else {
-      this.bindingError = '重置失败';
+      this.bindingError = '同步失败，请检查网络后重试';
     }
     this.renderBindingPanel();
   }
@@ -856,7 +840,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
     if (!this.plugin.deviceId) {
       wrap.createEl('div', {
         cls: 'setting-item-description',
-        text: '设备未连接，绑定或初始化成功后即可管理设备列表。',
+        text: '暂无其他设备连接',
       });
       return;
     }
@@ -873,7 +857,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
       return;
     }
     if (this.devices.length === 0) {
-      wrap.createEl('div', { cls: 'setting-item-description', text: '暂无设备' });
+      wrap.createEl('div', { cls: 'setting-item-description', text: '暂无其他设备连接' });
       return;
     }
 
@@ -916,7 +900,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
         btn.addEventListener('click', () => {
           if (
             window.confirm(
-              `删除后，该设备将无法继续同步，需要重新输入设备绑定码才能再次连接。\n\n确定移除「${d.device_name || d.device_id}」吗？`,
+              `移除后，该设备将无法继续同步，需重新输入设备绑定码才能连接。\n\n确定移除「${d.device_name || '该设备'}」吗？`,
             )
           ) {
             void this.plugin.deleteDeviceOnServer(d.device_id).then((ok) => {
@@ -925,8 +909,14 @@ class VaultSyncSettingTab extends PluginSettingTab {
           }
         });
       } else {
-        tdOp.createSpan({ cls: 'setting-item-description', text: '—' });
+        tdOp.createSpan({ cls: 'setting-item-description', text: '不可移除' });
       }
+    }
+    if (sorted.length === 1) {
+      wrap.createEl('div', {
+        cls: 'setting-item-description',
+        text: '当前仅此设备',
+      });
     }
   }
 
@@ -934,7 +924,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
     if (!this.plugin.deviceId) {
       this.devices = [];
       this.renderDeviceList();
-      this.refreshGuideAndSyncPanels();
+      this.refreshSyncStatusPanel();
       return;
     }
     this.devicesLoading = true;
@@ -948,14 +938,14 @@ class VaultSyncSettingTab extends PluginSettingTab {
       this.devicesError = res.message;
     }
     this.renderDeviceList();
-    this.refreshGuideAndSyncPanels();
+    this.refreshSyncStatusPanel();
   }
 
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
     this.clearBindingTimers();
-    this.clearGuideTicker();
+    this.clearSyncStatusTicker();
     this.bindingPanelEl = null;
     this.deviceListEl = null;
     this.bindingCopyFeedback = null;
@@ -964,34 +954,33 @@ class VaultSyncSettingTab extends PluginSettingTab {
     this.bindingError = null;
     this.devicesError = null;
     this.revealHint = null;
-    this.guideContainerEl = null;
     this.syncStatusContainerEl = null;
     this.debugIdentityEl = null;
 
-    containerEl.createEl('h2', { text: '笔记同步' });
-
-    const guideWrap = containerEl.createDiv({ cls: 'vault-sync-section vault-sync-guide-section' });
-    guideWrap.createEl('div', { cls: 'vault-sync-section-label', text: '下一步' });
-    this.guideContainerEl = guideWrap.createDiv({ cls: 'vault-sync-guide' });
-    this.fillGuideSection(this.guideContainerEl);
+    const titleRow = containerEl.createDiv({ cls: 'hailysync-settings-title' });
+    titleRow.createEl('h2', { text: '海狸同步' });
+    titleRow.createEl('div', {
+      cls: 'setting-item-description',
+      text: '海狸同步（HailySync）',
+    });
 
     const syncWrap = containerEl.createDiv({ cls: 'vault-sync-section vault-sync-sync-status-section' });
     syncWrap.createEl('div', { cls: 'vault-sync-section-label', text: '同步状态' });
     this.syncStatusContainerEl = syncWrap.createDiv({ cls: 'vault-sync-sync-status' });
     this.fillSyncStatusSection(this.syncStatusContainerEl);
 
-    this.guideSyncTicker = window.setInterval(() => {
-      this.refreshGuideAndSyncPanels();
+    this.syncStatusTicker = window.setInterval(() => {
+      this.refreshSyncStatusPanel();
     }, 1000);
 
     const bindingBlock = containerEl.createDiv({ cls: 'vault-sync-binding-card' });
     bindingBlock.createEl('div', {
       cls: 'vault-sync-credential-notice',
-      text: '这是你连接新设备和恢复同步身份的唯一凭证，请妥善保存。',
+      text: '用于连接新设备，请妥善保存，避免泄露',
     });
     new Setting(bindingBlock)
       .setName('设备绑定码')
-      .setDesc('可显示完整码（20 秒后自动隐藏）、复制到剪贴板或重置；重置后旧码失效。')
+      .setDesc('显示完整码约 20 秒后自动隐藏；可随时复制。重置会使旧码失效，请谨慎操作。')
       .addButton((btn) =>
         btn.setButtonText('显示').onClick(() => {
           void this.onShowReveal();
@@ -1003,7 +992,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
         }),
       )
       .addButton((btn) =>
-        btn.setButtonText('重置').onClick(() => {
+        btn.setButtonText('重置').setWarning().onClick(() => {
           void this.onResetBinding();
         }),
       );
@@ -1014,24 +1003,43 @@ class VaultSyncSettingTab extends PluginSettingTab {
     const bindNewBlock = containerEl.createDiv({ cls: 'vault-sync-section' });
     new Setting(bindNewBlock)
       .setName('绑定新设备')
-      .setDesc('在新设备输入设备绑定码即可连接并开始同步。')
+      .setDesc('输入设备绑定码即可连接')
       .addText((text) => {
         bindingInput = text.inputEl;
         text.setPlaceholder('请输入设备绑定码');
       })
-      .addButton((btn) =>
-        btn.setButtonText('绑定设备').onClick(() => {
+      .addButton((btn) => {
+        btn.setButtonText('连接设备');
+        btn.onClick(() => {
           const code = bindingInput?.value?.trim() ?? '';
-          void this.plugin.bindWithCode(code).then((ok) => {
-            if (ok) this.display();
-          });
-        }),
-      );
+          if (!code) {
+            new Notice('请先输入设备绑定码');
+            return;
+          }
+          void (async () => {
+            let reopened = false;
+            btn.setButtonText('连接中…');
+            btn.setDisabled(true);
+            try {
+              const ok = await this.plugin.bindWithCode(code);
+              if (ok) {
+                reopened = true;
+                this.display();
+              }
+            } finally {
+              if (!reopened) {
+                btn.setDisabled(false);
+                btn.setButtonText('连接设备');
+              }
+            }
+          })();
+        });
+      });
 
     const devBlock = containerEl.createDiv({ cls: 'vault-sync-devices-block' });
     new Setting(devBlock)
       .setName('已绑定设备')
-      .setDesc('当前设备无法删除；可从列表中移除其他设备。')
+      .setDesc('当前设备不可移除')
       .addButton((btn) => {
         btn.buttonEl.classList.add('mod-muted');
         btn.setButtonText('刷新列表').onClick(() => {
@@ -1043,7 +1051,7 @@ class VaultSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('自动同步')
-      .setDesc('开启后将每 60 秒自动同步一次。')
+      .setDesc('开启后将自动定期同步（推荐开启）')
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
           this.plugin.settings.enableSync = value;
@@ -1053,19 +1061,45 @@ class VaultSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('手动同步')
-      .setDesc('立即执行一次同步。')
-      .addButton((btn) =>
-        btn.setButtonText('立即同步').onClick(() => {
-          void this.plugin.syncNow();
-        }),
-      );
+      .setDesc('立即执行一次同步')
+      .addButton((btn) => {
+        btn.setButtonText('立即同步');
+        btn.onClick(() => {
+          void (async () => {
+            if (this.plugin.isSyncing) {
+              new Notice('请稍候，上一同步尚未结束');
+              return;
+            }
+            const idleLabel = '立即同步';
+            btn.setButtonText('正在同步…');
+            btn.setDisabled(true);
+            try {
+              await this.plugin.syncNow();
+            } finally {
+              btn.setDisabled(false);
+              if (this.plugin.lastSyncError) {
+                btn.setButtonText(idleLabel);
+              } else {
+                btn.setButtonText('同步完成');
+                window.setTimeout(() => {
+                  btn.setButtonText(idleLabel);
+                }, 1000);
+              }
+            }
+          })();
+        });
+      });
 
     const advanced = containerEl.createEl('details', { cls: 'vault-sync-advanced' });
     advanced.createEl('summary', { text: '高级设置' });
+    advanced.createEl('div', {
+      cls: 'setting-item-description vault-sync-advanced-hint',
+      text: '仅在需要时修改',
+    });
     const advBody = advanced.createDiv({ cls: 'vault-sync-advanced-body' });
     new Setting(advBody)
       .setName('服务器地址')
-      .setDesc('留空则使用默认服务器地址。')
+      .setDesc('留空将使用默认服务器')
       .addText((text) =>
         text
           .setPlaceholder(BUILTIN_DEFAULT_SERVER_URL)
@@ -1075,16 +1109,18 @@ class VaultSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
-    const debugBlock = advBody.createDiv({ cls: 'vault-sync-debug-block' });
-    debugBlock.createEl('div', {
-      cls: 'setting-item-description',
-      text: '调试信息（用于排查连接问题）',
+
+    const debugDetails = advBody.createEl('details', { cls: 'vault-sync-debug-details' });
+    debugDetails.createEl('summary', { text: '调试信息（展开）' });
+    this.debugIdentityEl = debugDetails.createDiv({ cls: 'vault-sync-debug-identity' });
+    debugDetails.addEventListener('toggle', () => {
+      if (debugDetails.open) {
+        this.fillDebugIdentity();
+      }
     });
-    this.debugIdentityEl = debugBlock.createDiv({ cls: 'vault-sync-debug-identity' });
 
     void this.plugin.ensureDeviceIdentity().then(async () => {
-      this.refreshGuideAndSyncPanels();
-      this.fillDebugIdentity();
+      this.refreshSyncStatusPanel();
 
       if (this.plugin.connectionState === 'connected' && this.plugin.deviceId) {
         await this.refreshBindingMaskOnly();
@@ -1096,6 +1132,8 @@ class VaultSyncSettingTab extends PluginSettingTab {
 }
 
 const SYNC_STATUS_RESULT_MS = 3500;
+/** 单次同步结束后最短间隔，缓和定时器与手动触发的竞态 */
+const SYNC_COOLDOWN_MS = 2000;
 const AUTO_SYNC_INTERVAL_MS = 60_000;
 const AUTO_SYNC_START_MIN_MS = 2000;
 const AUTO_SYNC_START_MAX_MS = 5000;
@@ -1116,6 +1154,8 @@ export default class ObsidianSyncPlugin extends Plugin {
   /** 最近一次同步失败原因（成功同步后清空） */
   lastSyncError: string | null = null;
   private syncRunning = false;
+  /** 自动同步与手动同步紧挨着结束时，短暂冷却避免并发重叠 */
+  private syncCooldownUntil = 0;
 
   get isSyncing(): boolean {
     return this.syncRunning;
@@ -1125,20 +1165,44 @@ export default class ObsidianSyncPlugin extends Plugin {
   private autoSyncStartupTimerId: number | null = null;
 
   async onload() {
-    await this.loadSettings();
-    await this.ensureDeviceIdentity();
+    try {
+      await this.loadSettings();
+      await this.ensureDeviceIdentity();
+    } catch (e) {
+      console.error('[HailySync] onload init failed', e);
+      try {
+        this.settings = Object.assign({}, DEFAULT_SETTINGS);
+      } catch {
+        /* ignore */
+      }
+      this.connectionState = 'awaiting_bind';
+      this.userId = '';
+      this.deviceId = '';
+    }
 
-    this.initSyncStatusBar();
+    try {
+      this.initSyncStatusBar();
+    } catch (e) {
+      console.error('[HailySync] status bar init failed', e);
+    }
 
-    this.addSettingTab(new VaultSyncSettingTab(this.app, this));
+    try {
+      this.addSettingTab(new HailySyncSettingTab(this.app, this));
+    } catch (e) {
+      console.error('[HailySync] addSettingTab failed', e);
+    }
 
-    this.addCommand({
-      id: 'sync-now',
-      name: '立即同步',
-      callback: () => {
-        void this.syncNow();
-      },
-    });
+    try {
+      this.addCommand({
+        id: 'hailysync-sync-now',
+        name: '立即同步',
+        callback: () => {
+          void this.syncNow();
+        },
+      });
+    } catch (e) {
+      console.error('[HailySync] addCommand failed', e);
+    }
 
     const startupDelay =
       AUTO_SYNC_START_MIN_MS +
@@ -1192,17 +1256,17 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   private setSyncStatusIdle(): void {
     this.clearStatusResultTimer();
-    this.setSyncStatusText('🟢 Sync Idle');
+    this.setSyncStatusText('同步运行正常');
   }
 
   private setSyncStatusSyncing(): void {
     this.clearStatusResultTimer();
-    this.setSyncStatusText('🔄 Syncing...');
+    this.setSyncStatusText('正在同步…');
   }
 
   private setSyncStatusSuccess(): void {
     this.clearStatusResultTimer();
-    this.setSyncStatusText('✔ Synced');
+    this.setSyncStatusText('同步完成');
     this.statusResultTimer = window.setTimeout(() => {
       this.statusResultTimer = null;
       this.setSyncStatusIdle();
@@ -1211,7 +1275,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   private setSyncStatusFailed(): void {
     this.clearStatusResultTimer();
-    this.setSyncStatusText('❌ Sync Failed');
+    this.setSyncStatusText('同步失败，请检查网络后重试');
     this.statusResultTimer = window.setTimeout(() => {
       this.statusResultTimer = null;
       this.setSyncStatusIdle();
@@ -1219,7 +1283,13 @@ export default class ObsidianSyncPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    let loaded: Partial<SyncPluginSettings> = {};
+    try {
+      loaded = (await this.loadData()) as Partial<SyncPluginSettings>;
+    } catch (e) {
+      console.error('[HailySync] loadData failed', e);
+    }
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
     if (typeof this.settings.enableSync !== 'boolean') {
       this.settings.enableSync = DEFAULT_SETTINGS.enableSync;
     }
@@ -1235,14 +1305,18 @@ export default class ObsidianSyncPlugin extends Plugin {
   }
 
   get baseUrl(): string {
-    return this.settings.serverUrl.trim().replace(/\/+$/, '');
+    const raw = this.settings?.serverUrl;
+    const s = typeof raw === 'string' ? raw.trim() : '';
+    const u = s || BUILTIN_DEFAULT_SERVER_URL;
+    return u.replace(/\/+$/, '');
   }
 
   /** 除 POST /api/init、POST /api/bind 外所有 sync API 使用 */
   private syncApiHeaders(): Record<string, string> {
-    if (!this.deviceId) return {};
+    const id = typeof this.deviceId === 'string' ? this.deviceId.trim() : '';
+    if (!id) return {};
     return {
-      'X-Device-Id': this.deviceId,
+      'X-Device-Id': id,
       'X-HailySync-Protocol': '1',
     };
   }
@@ -1333,6 +1407,7 @@ export default class ObsidianSyncPlugin extends Plugin {
   async fetchVaultEnvelope(): Promise<VaultEnvelopeJson> {
     const res = await axios.get<VaultEnvelopeJson>(`${this.baseUrl}/api/vault/envelope`, {
       headers: this.syncApiHeaders(),
+      ...AXIOS_TIMEOUT_DEFAULTS,
     });
     if (!isPlainObjectRecord(res.data as unknown)) {
       throw new Error('GET /api/vault/envelope 响应非法');
@@ -1467,7 +1542,7 @@ export default class ObsidianSyncPlugin extends Plugin {
           SYNC_CONFIG_FILENAME,
           JSON.stringify({ pending_bind: true } satisfies SyncIdentityConfig, null, 2),
         );
-        new Notice('检测到旧版仅 user_id 的配置，请输入绑定码完成设备绑定', 12000);
+        new Notice('请先输入设备绑定码', 12000);
         return;
       }
     } catch {
@@ -1482,7 +1557,7 @@ export default class ObsidianSyncPlugin extends Plugin {
     const server = this.baseUrl;
     if (!server) {
       this.connectionState = 'awaiting_bind';
-      new Notice('无效的服务器地址');
+      new Notice('连接失败，请检查网络');
       return;
     }
     try {
@@ -1490,21 +1565,25 @@ export default class ObsidianSyncPlugin extends Plugin {
         user_id?: string;
         device_id?: string;
         binding_code?: string;
-      }>(`${server}/api/init`, {
-        device_name: getDeviceDisplayName(),
-        device_type: getDeviceTypeLabel(),
-      });
+      }>(
+        `${server}/api/init`,
+        {
+          device_name: getDeviceDisplayName(),
+          device_type: getDeviceTypeLabel(),
+        },
+        { ...AXIOS_TIMEOUT_DEFAULTS },
+      );
       const uid = res.data?.user_id;
       const did = res.data?.device_id;
       const bindingCode = res.data?.binding_code;
       if (typeof uid !== 'string' || !uid.trim() || typeof did !== 'string' || !did.trim()) {
         this.connectionState = 'awaiting_bind';
-        new Notice('初始化失败：服务端未返回 user_id / device_id');
+        new Notice('同步失败，请检查网络后重试');
         return;
       }
       if (typeof bindingCode !== 'string' || !bindingCode.trim()) {
         this.connectionState = 'awaiting_bind';
-        new Notice('初始化失败：服务端未返回 binding_code');
+        new Notice('同步失败，请检查网络后重试');
         return;
       }
       try {
@@ -1519,18 +1598,15 @@ export default class ObsidianSyncPlugin extends Plugin {
           SYNC_CONFIG_FILENAME,
           JSON.stringify({ pending_bind: true } satisfies SyncIdentityConfig, null, 2),
         );
-        new Notice(
-          'Vault 密钥包上传失败，已回滚本地设备配置：' + formatSyncError(e),
-          12000,
-        );
+        new Notice('同步失败，请检查网络后重试', 12000);
         return;
       }
     } catch (e) {
       this.connectionState = 'awaiting_bind';
       if (isNetworkError(e)) {
-        new Notice('网络异常，请稍后重试');
+        new Notice('连接失败，请检查网络');
       } else {
-        new Notice('初始化失败：' + formatSyncError(e));
+        new Notice('同步失败，请检查网络后重试');
       }
     }
   }
@@ -1597,16 +1673,17 @@ export default class ObsidianSyncPlugin extends Plugin {
     try {
       const res = await axios.get(`${server}/api/binding-code`, {
         headers: this.syncApiHeaders(),
+        ...AXIOS_TIMEOUT_DEFAULTS,
       });
       return extractBindingCodeFromJson(res.data);
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+        new Notice('请重新输入设备绑定码以恢复连接', 12000);
         return null;
       }
       if (isNetworkError(e)) {
-        new Notice('网络异常，请稍后重试');
+        new Notice('连接失败，请检查网络');
         return null;
       }
       return null;
@@ -1618,16 +1695,20 @@ export default class ObsidianSyncPlugin extends Plugin {
     const server = this.baseUrl;
     if (!server) return false;
     try {
-      await axios.post(`${server}/api/binding-code/reset`, {}, { headers: this.syncApiHeaders() });
+      await axios.post(
+        `${server}/api/binding-code/reset`,
+        {},
+        { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS },
+      );
       return true;
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+        new Notice('请重新输入设备绑定码以恢复连接', 12000);
         return false;
       }
       if (isNetworkError(e)) {
-        new Notice('网络异常，请稍后重试');
+        new Notice('连接失败，请检查网络');
         return false;
       }
       return false;
@@ -1637,22 +1718,22 @@ export default class ObsidianSyncPlugin extends Plugin {
   async fetchDevicesList(): Promise<
     { ok: true; devices: ApiDeviceRow[] } | { ok: false; message: string }
   > {
-    if (!this.deviceId) return { ok: false, message: '无效的设备' };
+    if (!this.deviceId) return { ok: true, devices: [] };
     try {
       const res = await axios.get(`${this.baseUrl}/api/devices`, {
         headers: this.syncApiHeaders(),
+        ...AXIOS_TIMEOUT_DEFAULTS,
       });
       const devices = parseDevicesListPayload(res.data);
       return { ok: true, devices };
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        return { ok: false, message: '当前设备已被移除' };
+        return { ok: false, message: '请重新输入设备绑定码以恢复连接' };
       }
-      if (isNetworkError(e)) {
-        return { ok: false, message: '网络异常，请稍后重试' };
-      }
-      return { ok: false, message: formatSyncError(e) };
+      console.error('[HailySync] fetchDevicesList failed', e);
+      /** 列表拉取失败：降级为空列表，不打断设置页（不触发 Notice） */
+      return { ok: true, devices: [] };
     }
   }
 
@@ -1664,21 +1745,21 @@ export default class ObsidianSyncPlugin extends Plugin {
       await axios.post(
         `${server}/api/device/delete`,
         { device_id: targetId },
-        { headers: this.syncApiHeaders() },
+        { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS },
       );
-      new Notice('已删除设备');
+      new Notice('操作已完成');
       return true;
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+        new Notice('请重新输入设备绑定码以恢复连接', 12000);
         return false;
       }
       if (isNetworkError(e)) {
-        new Notice('网络异常，请稍后重试');
+        new Notice('连接失败，请检查网络');
         return false;
       }
-      new Notice('删除失败：' + formatSyncError(e));
+      new Notice('同步失败，请检查网络后重试');
       return false;
     }
   }
@@ -1686,12 +1767,12 @@ export default class ObsidianSyncPlugin extends Plugin {
   async bindWithCode(raw: string): Promise<boolean> {
     const code = raw.trim();
     if (!code) {
-      new Notice('请输入设备绑定码');
+      new Notice('请先输入设备绑定码');
       return false;
     }
     const server = this.baseUrl;
     if (!server) {
-      new Notice('绑定失败：请先在高级设置中填写有效的服务器地址', 6000);
+      new Notice('连接失败，请检查网络', 6000);
       return false;
     }
     try {
@@ -1702,11 +1783,15 @@ export default class ObsidianSyncPlugin extends Plugin {
         kek_derivation_version?: number;
         vault_key_version?: number;
         envelope?: VaultEnvelopeJson;
-      }>(`${server}/api/bind`, {
-        binding_code: code,
-        device_name: getDeviceDisplayName(),
-        device_type: getDeviceTypeLabel(),
-      });
+      }>(
+        `${server}/api/bind`,
+        {
+          binding_code: code,
+          device_name: getDeviceDisplayName(),
+          device_type: getDeviceTypeLabel(),
+        },
+        { ...AXIOS_TIMEOUT_DEFAULTS },
+      );
       const uid = res.data?.user_id;
       const did = res.data?.device_id;
       const kekSalt = res.data?.kek_salt;
@@ -1714,7 +1799,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       const vkv = res.data?.vault_key_version;
       const envelope = res.data?.envelope;
       if (typeof uid !== 'string' || !uid.trim() || typeof did !== 'string' || !did.trim()) {
-        new Notice('绑定失败：服务端未返回有效信息，请稍后重试', 6000);
+        new Notice('设备绑定失败，请确认绑定码正确', 6000);
         return false;
       }
       if (
@@ -1724,7 +1809,7 @@ export default class ObsidianSyncPlugin extends Plugin {
         envelope == null ||
         typeof envelope !== 'object'
       ) {
-        new Notice('绑定失败：服务端未返回完整 envelope / kek 字段', 8000);
+        new Notice('设备绑定失败，请确认绑定码正确', 8000);
         return false;
       }
       try {
@@ -1736,25 +1821,26 @@ export default class ObsidianSyncPlugin extends Plugin {
         });
         await this.unlockVaultFromBindingCode(code, envelope);
       } catch (e) {
-        new Notice('绑定解密失败：' + formatSyncError(e), 12000);
+        console.error('[HailySync] bind unlock failed', e);
+        new Notice('设备绑定失败，请确认绑定码正确', 12000);
         await this.wipeVaultKeyLocal();
         return false;
       }
       await this.persistFullIdentity(uid.trim(), did.trim(), code.trim());
-      new Notice('设备绑定成功，正在开始同步');
+      new Notice('设备连接成功，开始同步');
       void this.syncNow();
       return true;
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
-        new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+        new Notice('请重新输入设备绑定码以恢复连接', 12000);
         return false;
       }
       if (isNetworkError(e)) {
-        new Notice('网络异常，请稍后重试');
+        new Notice('连接失败，请检查网络');
         return false;
       }
-      new Notice('设备绑定码无效或已失效');
+      new Notice('设备绑定失败，请确认绑定码正确');
       return false;
     }
   }
@@ -1815,10 +1901,9 @@ export default class ObsidianSyncPlugin extends Plugin {
     const res = await axios.get(this.baseUrl + '/files', {
       headers: this.syncApiHeaders(),
       responseType: 'text',
+      ...AXIOS_TIMEOUT_DEFAULTS,
     });
     const raw = res.data as unknown;
-
-    console.log('RAW /files response:', raw);
 
     if (typeof raw !== 'string') {
       throw new Error('/files 响应类型异常');
@@ -2030,7 +2115,7 @@ export default class ObsidianSyncPlugin extends Plugin {
         relative_path: normalized,
         updated_at,
       },
-      { headers: this.syncApiHeaders() },
+      { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS },
     );
     const d = res.data;
     if (d.success !== true || d.relative_path !== normalized || typeof d.updated_at !== 'number') {
@@ -2048,10 +2133,18 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   async syncNow(options?: { auto?: boolean }) {
     const isAuto = options?.auto === true;
-    await this.ensureDeviceIdentity();
+    if (isAuto && Date.now() < this.syncCooldownUntil) {
+      return;
+    }
+    try {
+      await this.ensureDeviceIdentity();
+    } catch (e) {
+      console.error('[HailySync] ensureDeviceIdentity in syncNow', e);
+      return;
+    }
 
     if (this.syncRunning) {
-      new Notice('同步已在进行中');
+      new Notice('请稍候，上一同步尚未结束');
       return;
     }
     this.syncRunning = true;
@@ -2060,7 +2153,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       if (!this.settings.enableSync) {
         this.lastSyncError = '同步已关闭，请先在设置中开启自动同步';
         this.setSyncStatusFailed();
-        new Notice('同步失败：请先开启「自动同步」');
+        new Notice('同步失败，请检查网络后重试');
         if (isAuto) console.log('[auto-sync] failed');
         return;
       }
@@ -2069,7 +2162,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       if (!server) {
         this.lastSyncError = '无效的服务器地址';
         this.setSyncStatusFailed();
-        new Notice('同步失败：无效的服务器地址');
+        new Notice('连接失败，请检查网络');
         if (isAuto) console.log('[auto-sync] failed');
         return;
       }
@@ -2080,9 +2173,9 @@ export default class ObsidianSyncPlugin extends Plugin {
           : '请先完成设备绑定后再同步';
         this.setSyncStatusFailed();
         if (this.wasRevoked) {
-          new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+          new Notice('请重新输入设备绑定码以恢复连接', 12000);
         } else {
-          new Notice('请先完成设备初始化或输入绑定码后再同步', 8000);
+          new Notice('设备绑定失败，请确认绑定码正确', 8000);
         }
         if (isAuto) console.log('[auto-sync] failed');
         return;
@@ -2095,24 +2188,18 @@ export default class ObsidianSyncPlugin extends Plugin {
           await this.handleDeviceRevoked();
           this.lastSyncError = '当前设备已被移除，无法继续同步';
           this.setSyncStatusFailed();
-          new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+          new Notice('请重新输入设备绑定码以恢复连接', 12000);
           if (isAuto) console.log('[auto-sync] failed');
           return;
         }
         this.lastSyncError = formatSyncError(e);
         this.setSyncStatusFailed();
         if (e instanceof Error && e.message === 'E2EE_NEED_BINDING_CODE') {
-          new Notice(
-            '本地缺少加密密钥。请在设置「绑定新设备」中输入绑定码以恢复（需与该 vault 所用绑定码一致）。',
-            15000,
-          );
+          new Notice('设备绑定失败，请确认绑定码正确', 15000);
         } else if (e instanceof Error && e.message === 'E2EE_NEED_FIRST_SETUP') {
-          new Notice(
-            '无法自动恢复加密：缺少绑定码备份。请使用「绑定新设备」输入绑定码，或删除 .sync_config.json 后重试以重新初始化。',
-            15000,
-          );
+          new Notice('设备绑定失败，请确认绑定码正确', 15000);
         } else {
-          new Notice('加密密钥不可用：' + formatSyncError(e), 12000);
+          new Notice('同步失败，请检查网络后重试', 12000);
         }
         if (isAuto) console.log('[auto-sync] failed');
         return;
@@ -2135,18 +2222,18 @@ export default class ObsidianSyncPlugin extends Plugin {
           await this.handleDeviceRevoked();
           this.lastSyncError = '当前设备已被移除，无法继续同步';
           this.setSyncStatusFailed();
-          new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+          new Notice('请重新输入设备绑定码以恢复连接', 12000);
           if (isAuto) console.log('[auto-sync] failed');
           return;
         }
         this.setSyncStatusFailed();
         if (isNetworkError(err)) {
           this.lastSyncError = '网络异常，请稍后重试';
-          new Notice('网络异常，请稍后重试', 8000);
+          new Notice('连接失败，请检查网络', 8000);
         } else {
           const detail = formatSyncError(err);
           this.lastSyncError = `无法获取笔记列表：${detail}`;
-          new Notice(`同步失败：无法获取笔记列表（${detail}）`, 8000);
+          new Notice('同步失败，请检查网络后重试', 8000);
         }
         if (isAuto) console.log('[auto-sync] failed');
         return;
@@ -2292,7 +2379,7 @@ export default class ObsidianSyncPlugin extends Plugin {
             await this.handleDeviceRevoked();
             this.lastSyncError = '当前设备已被移除，无法继续同步';
             this.setSyncStatusFailed();
-            new Notice('当前设备已被移除，请重新输入设备绑定码连接', 12000);
+            new Notice('请重新输入设备绑定码以恢复连接', 12000);
             if (isAuto) console.log('[auto-sync] failed');
             return;
           }
@@ -2310,7 +2397,7 @@ export default class ObsidianSyncPlugin extends Plugin {
         this.lastSyncError =
           preview.length > 500 ? `${preview.slice(0, 500)}…` : preview;
         this.setSyncStatusFailed();
-        new Notice(`同步失败：部分文件未同步（${preview}）`, 10000);
+        new Notice('同步失败，请检查网络后重试', 10000);
         if (isAuto) console.log('[auto-sync] failed');
         return;
       }
@@ -2323,15 +2410,16 @@ export default class ObsidianSyncPlugin extends Plugin {
       this.setSyncStatusFailed();
       if (isNetworkError(e)) {
         this.lastSyncError = '网络异常，请稍后重试';
-        new Notice('网络异常，请稍后重试', 8000);
+        new Notice('连接失败，请检查网络', 8000);
       } else {
         const msg = formatSyncError(e);
         this.lastSyncError = msg;
-        new Notice(`同步失败：${msg}`, 8000);
+        new Notice('同步失败，请检查网络后重试', 8000);
       }
       if (isAuto) console.log('[auto-sync] failed');
     } finally {
       this.syncRunning = false;
+      this.syncCooldownUntil = Date.now() + SYNC_COOLDOWN_MS;
     }
   }
 }
