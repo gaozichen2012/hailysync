@@ -1,8 +1,8 @@
 {
   "id": "hailysync",
   "name": "海狸同步 HailySync",
-  "version": "0.1.33",
-  "minAppVersion": "1.5.0",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
   "description": "Cloud sync solution for Obsidian",
   "author": "Hailink",
   "isDesktopOnly": true,
