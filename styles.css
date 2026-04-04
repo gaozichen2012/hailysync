@@ -2,6 +2,14 @@
 	margin-bottom: 0.15em;
 }
 
+.hailysync-settings-brand-en {
+	font-size: var(--font-ui-medium);
+	font-weight: 500;
+	color: var(--text-muted);
+	line-height: 1.35;
+	margin-bottom: 0.35em;
+}
+
 .vault-sync-section {
 	margin-top: 1em;
 	margin-bottom: 0.25em;

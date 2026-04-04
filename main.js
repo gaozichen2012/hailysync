@@ -17568,6 +17568,19 @@ function getDeviceDisplayName() {
   }
   return "Obsidian";
 }
+function formatDeviceTypeForUi(raw) {
+  const t = typeof raw === "string" ? raw.trim() : "";
+  if (!t) return "\u2014";
+  const s = t.toLowerCase();
+  const map = {
+    windows: "Windows",
+    mac: "Mac",
+    ios: "iOS",
+    android: "Android"
+  };
+  if (map[s]) return map[s];
+  return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+}
 function maskBindingCode(code) {
   const s = code.trim();
   if (!s) return "";
@@ -17889,12 +17902,10 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
     }
     if (syncing) {
       el.createEl("div", { cls: "vault-sync-status-line", text: "\u6B63\u5728\u540C\u6B65\u2026" });
-      if (this.plugin.lastSyncAt != null) {
-        el.createEl("div", {
-          cls: "setting-item-description",
-          text: `\u6700\u8FD1\u540C\u6B65\uFF1A${formatRelativeTimeShort(this.plugin.lastSyncAt)}`
-        });
-      }
+      el.createEl("div", {
+        cls: "setting-item-description",
+        text: this.plugin.lastSyncAt != null ? `\u6700\u8FD1\u540C\u6B65\uFF1A${formatRelativeTimeShort(this.plugin.lastSyncAt)}` : "\u6700\u8FD1\u540C\u6B65\uFF1A\u5C1A\u672A\u540C\u6B65"
+      });
       return;
     }
     if (this.plugin.lastSyncError) {
@@ -17923,7 +17934,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
     } else {
       el.createEl("div", {
         cls: "setting-item-description",
-        text: "\u6700\u8FD1\u540C\u6B65\uFF1A\u5C1A\u672A\u5B8C\u6210\u9996\u6B21\u540C\u6B65"
+        text: "\u6700\u8FD1\u540C\u6B65\uFF1A\u5C1A\u672A\u540C\u6B65"
       });
     }
     if (this.devices.length < 2) {
@@ -18151,7 +18162,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
         nameCell.appendText(" ");
         nameCell.createSpan({ cls: "vault-sync-badge-current", text: "\u5F53\u524D\u8BBE\u5907" });
       }
-      tr.createEl("td", { text: d.device_type || "\u2014" });
+      tr.createEl("td", { text: formatDeviceTypeForUi(d.device_type) });
       const last = d.last_active_at != null && Number.isFinite(d.last_active_at) ? formatDeviceLastActive(d.last_active_at) : "\u6682\u65E0\u8BB0\u5F55";
       tr.createEl("td", { text: last });
       const tdOp = tr.createEl("td");
@@ -18217,10 +18228,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
     this.debugIdentityEl = null;
     const titleRow = containerEl.createDiv({ cls: "hailysync-settings-title" });
     titleRow.createEl("h2", { text: "\u6D77\u72F8\u540C\u6B65" });
-    titleRow.createEl("div", {
-      cls: "setting-item-description",
-      text: "\u6D77\u72F8\u540C\u6B65\uFF08HailySync\uFF09"
-    });
+    titleRow.createEl("div", { cls: "hailysync-settings-brand-en", text: "HailySync" });
     const syncWrap = containerEl.createDiv({ cls: "vault-sync-section vault-sync-sync-status-section" });
     syncWrap.createEl("div", { cls: "vault-sync-section-label", text: "\u540C\u6B65\u72B6\u6001" });
     this.syncStatusContainerEl = syncWrap.createDiv({ cls: "vault-sync-sync-status" });
@@ -18229,11 +18237,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
       this.refreshSyncStatusPanel();
     }, 1e3);
     const bindingBlock = containerEl.createDiv({ cls: "vault-sync-binding-card" });
-    bindingBlock.createEl("div", {
-      cls: "vault-sync-credential-notice",
-      text: "\u7528\u4E8E\u8FDE\u63A5\u65B0\u8BBE\u5907\uFF0C\u8BF7\u59A5\u5584\u4FDD\u5B58\uFF0C\u907F\u514D\u6CC4\u9732"
-    });
-    new import_obsidian.Setting(bindingBlock).setName("\u8BBE\u5907\u7ED1\u5B9A\u7801").setDesc("\u663E\u793A\u5B8C\u6574\u7801\u7EA6 20 \u79D2\u540E\u81EA\u52A8\u9690\u85CF\uFF1B\u53EF\u968F\u65F6\u590D\u5236\u3002\u91CD\u7F6E\u4F1A\u4F7F\u65E7\u7801\u5931\u6548\uFF0C\u8BF7\u8C28\u614E\u64CD\u4F5C\u3002").addButton(
+    new import_obsidian.Setting(bindingBlock).setName("\u8BBE\u5907\u7ED1\u5B9A\u7801").setDesc("\u7528\u4E8E\u8FDE\u63A5\u65B0\u8BBE\u5907\uFF0C\u8BF7\u59A5\u5584\u4FDD\u5B58\uFF0C\u907F\u514D\u6CC4\u9732").addButton(
       (btn) => btn.setButtonText("\u663E\u793A").onClick(() => {
         void this.onShowReveal();
       })
@@ -18252,15 +18256,19 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
     const bindNewBlock = containerEl.createDiv({ cls: "vault-sync-section" });
     new import_obsidian.Setting(bindNewBlock).setName("\u7ED1\u5B9A\u65B0\u8BBE\u5907").setDesc("\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u5373\u53EF\u8FDE\u63A5").addText((text) => {
       bindingInput = text.inputEl;
-      text.setPlaceholder("\u8BF7\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801");
+      text.setPlaceholder("\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801");
     }).addButton((btn) => {
       btn.setButtonText("\u8FDE\u63A5\u8BBE\u5907");
+      const syncConnectButtonState = () => {
+        const has = !!bindingInput?.value?.trim();
+        if (btn.buttonEl.textContent === "\u8FDE\u63A5\u4E2D\u2026") return;
+        btn.setDisabled(!has);
+      };
+      bindingInput?.addEventListener("input", syncConnectButtonState);
+      syncConnectButtonState();
       btn.onClick(() => {
         const code = bindingInput?.value?.trim() ?? "";
-        if (!code) {
-          new import_obsidian.Notice("\u8BF7\u5148\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801");
-          return;
-        }
+        if (!code) return;
         void (async () => {
           let reopened = false;
           btn.setButtonText("\u8FDE\u63A5\u4E2D\u2026");
@@ -18273,8 +18281,8 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
             }
           } finally {
             if (!reopened) {
-              btn.setDisabled(false);
               btn.setButtonText("\u8FDE\u63A5\u8BBE\u5907");
+              syncConnectButtonState();
             }
           }
         })();

@@ -219,6 +219,21 @@ function getDeviceDisplayName(): string {
   return 'Obsidian';
 }
 
+/** 设备列表「类型」列展示映射，不改协议与上报值 */
+function formatDeviceTypeForUi(raw: string | undefined | null): string {
+  const t = typeof raw === 'string' ? raw.trim() : '';
+  if (!t) return '—';
+  const s = t.toLowerCase();
+  const map: Record<string, string> = {
+    windows: 'Windows',
+    mac: 'Mac',
+    ios: 'iOS',
+    android: 'Android',
+  };
+  if (map[s]) return map[s];
+  return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+}
+
 /** 脱敏：ABCD-****-WXYZ */
 function maskBindingCode(code: string): string {
   const s = code.trim();
@@ -592,12 +607,13 @@ class HailySyncSettingTab extends PluginSettingTab {
 
     if (syncing) {
       el.createEl('div', { cls: 'vault-sync-status-line', text: '正在同步…' });
-      if (this.plugin.lastSyncAt != null) {
-        el.createEl('div', {
-          cls: 'setting-item-description',
-          text: `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`,
-        });
-      }
+      el.createEl('div', {
+        cls: 'setting-item-description',
+        text:
+          this.plugin.lastSyncAt != null
+            ? `最近同步：${formatRelativeTimeShort(this.plugin.lastSyncAt)}`
+            : '最近同步：尚未同步',
+      });
       return;
     }
 
@@ -629,7 +645,7 @@ class HailySyncSettingTab extends PluginSettingTab {
     } else {
       el.createEl('div', {
         cls: 'setting-item-description',
-        text: '最近同步：尚未完成首次同步',
+        text: '最近同步：尚未同步',
       });
     }
 
@@ -887,7 +903,7 @@ class HailySyncSettingTab extends PluginSettingTab {
         nameCell.appendText(' ');
         nameCell.createSpan({ cls: 'vault-sync-badge-current', text: '当前设备' });
       }
-      tr.createEl('td', { text: d.device_type || '—' });
+      tr.createEl('td', { text: formatDeviceTypeForUi(d.device_type) });
       const last =
         d.last_active_at != null && Number.isFinite(d.last_active_at)
           ? formatDeviceLastActive(d.last_active_at)
@@ -959,10 +975,7 @@ class HailySyncSettingTab extends PluginSettingTab {
 
     const titleRow = containerEl.createDiv({ cls: 'hailysync-settings-title' });
     titleRow.createEl('h2', { text: '海狸同步' });
-    titleRow.createEl('div', {
-      cls: 'setting-item-description',
-      text: '海狸同步（HailySync）',
-    });
+    titleRow.createEl('div', { cls: 'hailysync-settings-brand-en', text: 'HailySync' });
 
     const syncWrap = containerEl.createDiv({ cls: 'vault-sync-section vault-sync-sync-status-section' });
     syncWrap.createEl('div', { cls: 'vault-sync-section-label', text: '同步状态' });
@@ -974,13 +987,9 @@ class HailySyncSettingTab extends PluginSettingTab {
     }, 1000);
 
     const bindingBlock = containerEl.createDiv({ cls: 'vault-sync-binding-card' });
-    bindingBlock.createEl('div', {
-      cls: 'vault-sync-credential-notice',
-      text: '用于连接新设备，请妥善保存，避免泄露',
-    });
     new Setting(bindingBlock)
       .setName('设备绑定码')
-      .setDesc('显示完整码约 20 秒后自动隐藏；可随时复制。重置会使旧码失效，请谨慎操作。')
+      .setDesc('用于连接新设备，请妥善保存，避免泄露')
       .addButton((btn) =>
         btn.setButtonText('显示').onClick(() => {
           void this.onShowReveal();
@@ -1006,16 +1015,20 @@ class HailySyncSettingTab extends PluginSettingTab {
       .setDesc('输入设备绑定码即可连接')
       .addText((text) => {
         bindingInput = text.inputEl;
-        text.setPlaceholder('请输入设备绑定码');
+        text.setPlaceholder('输入设备绑定码');
       })
       .addButton((btn) => {
         btn.setButtonText('连接设备');
+        const syncConnectButtonState = () => {
+          const has = !!(bindingInput?.value?.trim());
+          if (btn.buttonEl.textContent === '连接中…') return;
+          btn.setDisabled(!has);
+        };
+        bindingInput?.addEventListener('input', syncConnectButtonState);
+        syncConnectButtonState();
         btn.onClick(() => {
           const code = bindingInput?.value?.trim() ?? '';
-          if (!code) {
-            new Notice('请先输入设备绑定码');
-            return;
-          }
+          if (!code) return;
           void (async () => {
             let reopened = false;
             btn.setButtonText('连接中…');
@@ -1028,8 +1041,8 @@ class HailySyncSettingTab extends PluginSettingTab {
               }
             } finally {
               if (!reopened) {
-                btn.setDisabled(false);
                 btn.setButtonText('连接设备');
+                syncConnectButtonState();
               }
             }
           })();
