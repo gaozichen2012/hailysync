@@ -5,6 +5,5 @@
   "minAppVersion": "0.15.0",
   "description": "Cloud sync solution for Obsidian",
   "author": "Hailink",
-  "isDesktopOnly": true,
-  "styles": "styles.css"
+  "isDesktopOnly": true
 }
