@@ -1,7 +1,7 @@
 {
   "name": "obsidian-sync-plugin",
   "version": "0.1.33",
-  "description": "Obsidian 插件：JSON 协议与 sync-server 双向同步（hash + /files）",
+  "description": "HailySync — Obsidian cloud sync client for sync-server (E2EE, /files protocol)",
   "main": "main.js",
   "scripts": {
     "build": "esbuild main.ts --bundle --platform=node --format=cjs --outfile=main.js --external:obsidian",

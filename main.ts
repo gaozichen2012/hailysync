@@ -195,7 +195,10 @@ function parseRemoteFilesItems(parsed: unknown): SyncMetaMap {
   return out;
 }
 
-/** 内置默认 sync-server，用户未填写或清空时使用 */
+/**
+ * 产品默认同步服务基址（非调试占位；用户可在设置中改为自建 sync-server）。
+ * 上架仓库公开此地址即允许用户直连官方/默认云端，与是否「敏感」无关；勿在此提交任何密钥。
+ */
 const BUILTIN_DEFAULT_SERVER_URL = 'http://120.77.77.185:3000';
 
 const BINDING_CODE_SHOW_MS = 20_000;
@@ -1114,7 +1117,7 @@ class HailySyncSettingTab extends PluginSettingTab {
       );
 
     const debugDetails = advBody.createEl('details', { cls: 'vault-sync-debug-details' });
-    debugDetails.createEl('summary', { text: '调试信息（展开）' });
+    debugDetails.createEl('summary', { text: '连接信息（用户 ID、设备 ID、服务器）' });
     this.debugIdentityEl = debugDetails.createDiv({ cls: 'vault-sync-debug-identity' });
     debugDetails.addEventListener('toggle', () => {
       if (debugDetails.open) {
@@ -1919,13 +1922,12 @@ export default class ObsidianSyncPlugin extends Plugin {
     try {
       data = JSON.parse(s) as unknown;
     } catch (e) {
-      console.error('JSON parse failed', e);
+      console.error('[HailySync] JSON parse failed for /files', e);
       throw new Error('/files 响应不是合法 JSON');
     }
 
     const remoteFiles = parseRemoteFilesItems(data);
 
-    console.log('/files items → paths:', Object.keys(remoteFiles).length);
     return remoteFiles;
   }
 
@@ -1947,8 +1949,6 @@ export default class ObsidianSyncPlugin extends Plugin {
       );
       const cipher_hash = await sha256HexOfBytes(wire);
       const cipher_size = wire.length;
-
-      console.log('upload e2ee:', normalized, plain.length, cipher_hash);
 
       const updated_at = Date.now();
       const form = new FormData();
@@ -2002,7 +2002,7 @@ export default class ObsidianSyncPlugin extends Plugin {
         plain_fingerprint: plainFp,
       };
     } catch (err) {
-      console.error('upload failed:', normalized, err);
+      console.error('[HailySync] upload failed:', normalized, err);
       throw err;
     }
   }
@@ -2054,13 +2054,11 @@ export default class ObsidianSyncPlugin extends Plugin {
         vault_key_version: remote.vault_key_version,
         plain_fingerprint: plainFp,
       };
-
-      console.log('download e2ee:', normalized, content.length, plainFp);
     } catch (err) {
       if (isAxiosError(err) && err.response?.status === 404) {
         throw new Error(`下载失败：远端无此文件 (HTTP 404) · ${normalized}`);
       }
-      console.error('download failed:', normalized, err);
+      console.error('[HailySync] download failed:', normalized, err);
       throw err;
     }
   }
@@ -2096,7 +2094,6 @@ export default class ObsidianSyncPlugin extends Plugin {
       } else {
         await this.app.vault.create(conflictPath, content);
       }
-      console.log('sync decision:', normalized, 'conflict', 'WROTE_CONFLICT_COPY', conflictPath);
     } catch (err) {
       if (isAxiosError(err) && err.response?.status === 404) {
         throw new Error(`冲突副本下载失败：远端无此文件 (HTTP 404) · ${normalized}`);
@@ -2157,7 +2154,6 @@ export default class ObsidianSyncPlugin extends Plugin {
         this.lastSyncError = '同步已关闭，请先在设置中开启自动同步';
         this.setSyncStatusFailed();
         new Notice('同步失败，请检查网络后重试');
-        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
 
@@ -2166,7 +2162,6 @@ export default class ObsidianSyncPlugin extends Plugin {
         this.lastSyncError = '无效的服务器地址';
         this.setSyncStatusFailed();
         new Notice('连接失败，请检查网络');
-        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
 
@@ -2180,7 +2175,6 @@ export default class ObsidianSyncPlugin extends Plugin {
         } else {
           new Notice('设备绑定失败，请确认绑定码正确', 8000);
         }
-        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
 
@@ -2192,7 +2186,6 @@ export default class ObsidianSyncPlugin extends Plugin {
           this.lastSyncError = '当前设备已被移除，无法继续同步';
           this.setSyncStatusFailed();
           new Notice('请重新输入设备绑定码以恢复连接', 12000);
-          if (isAuto) console.log('[auto-sync] failed');
           return;
         }
         this.lastSyncError = formatSyncError(e);
@@ -2204,11 +2197,9 @@ export default class ObsidianSyncPlugin extends Plugin {
         } else {
           new Notice('同步失败，请检查网络后重试', 12000);
         }
-        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
 
-      if (isAuto) console.log('[auto-sync] start');
       this.setSyncStatusSyncing();
       new Notice('正在同步…');
 
@@ -2226,7 +2217,6 @@ export default class ObsidianSyncPlugin extends Plugin {
           this.lastSyncError = '当前设备已被移除，无法继续同步';
           this.setSyncStatusFailed();
           new Notice('请重新输入设备绑定码以恢复连接', 12000);
-          if (isAuto) console.log('[auto-sync] failed');
           return;
         }
         this.setSyncStatusFailed();
@@ -2238,7 +2228,6 @@ export default class ObsidianSyncPlugin extends Plugin {
           this.lastSyncError = `无法获取笔记列表：${detail}`;
           new Notice('同步失败，请检查网络后重试', 8000);
         }
-        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
 
@@ -2278,11 +2267,9 @@ export default class ObsidianSyncPlugin extends Plugin {
             if (localExists) {
               // 无 baseline：本地新建或从未记入 meta，远端仅剩删除墓碑 → 应上传，勿误删本地
               if (!meta[path]) {
-                console.log('sync decision:', path, 'upload', 'LOCAL_NEW_REMOTE_TOMBSTONE');
                 await this.uploadFile(path, meta);
                 continue;
               }
-              console.log('sync decision:', path, 'delete_local', 'REMOTE_DELETED');
               await this.deleteLocalFile(path);
             }
             delete meta[path];
@@ -2294,7 +2281,6 @@ export default class ObsidianSyncPlugin extends Plugin {
               delete meta[path];
               continue;
             }
-            console.log('sync decision:', path, 'post_delete_remote', 'LOCAL_DELETED');
             await this.postDeleteRemote(path);
             delete meta[path];
             continue;
@@ -2302,17 +2288,10 @@ export default class ObsidianSyncPlugin extends Plugin {
 
           if (localExists) {
             if (localPlainFp === null) {
-              console.log('sync decision:', path, 'noop', 'read_failed');
               continue;
             }
-            console.log('compare:', {
-              filePath: path,
-              localPlainFp,
-              remoteCipher: r?.cipher_hash,
-            });
 
             if (!r) {
-              console.log('sync decision:', path, 'upload', 'LOCAL_NEW');
               await this.uploadFile(path, meta);
               continue;
             }
@@ -2323,7 +2302,6 @@ export default class ObsidianSyncPlugin extends Plugin {
               remoteCipherStr === '' ||
               r.encryption_version !== ENCRYPTION_VERSION_WIRE
             ) {
-              console.log('sync decision:', path, 'noop', 'remote_cipher_or_enc_invalid');
               continue;
             }
 
@@ -2338,7 +2316,6 @@ export default class ObsidianSyncPlugin extends Plugin {
               baseCipherStr === remoteCipherStr &&
               basePlain === localPlainFp
             ) {
-              console.log('sync decision:', path, 'noop', 'SYNCED');
               meta[path] = {
                 cipher_hash: remoteCipherStr,
                 cipher_size: r.cipher_size,
@@ -2352,28 +2329,23 @@ export default class ObsidianSyncPlugin extends Plugin {
             }
 
             if (hasBase && basePlain !== localPlainFp && baseCipherStr !== remoteCipherStr) {
-              console.log('sync decision:', path, 'conflict', 'BOTH_MODIFIED');
               await this.writeConflictFromRemote(path, r);
               continue;
             }
             if (hasBase && basePlain === localPlainFp && baseCipherStr !== remoteCipherStr) {
-              console.log('sync decision:', path, 'download', 'REMOTE_MODIFIED');
               await this.downloadFile(path, meta, r);
               continue;
             }
             if (hasBase && baseCipherStr === remoteCipherStr && basePlain !== localPlainFp) {
-              console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED');
               await this.uploadFile(path, meta);
               continue;
             }
 
-            console.log('sync decision:', path, 'upload', 'LOCAL_MODIFIED_OR_NO_BASE');
             await this.uploadFile(path, meta);
             continue;
           }
 
           if (r) {
-            console.log('sync decision:', path, 'download', 'REMOTE_NEW');
             await this.downloadFile(path, meta, r);
             continue;
           }
@@ -2383,10 +2355,9 @@ export default class ObsidianSyncPlugin extends Plugin {
             this.lastSyncError = '当前设备已被移除，无法继续同步';
             this.setSyncStatusFailed();
             new Notice('请重新输入设备绑定码以恢复连接', 12000);
-            if (isAuto) console.log('[auto-sync] failed');
             return;
           }
-          console.error('sync step failed:', path, e);
+          console.error('[HailySync] sync step failed:', path, e);
           stepErrors.push(`${path}: ${formatSyncError(e)}`);
         }
       }
@@ -2401,14 +2372,12 @@ export default class ObsidianSyncPlugin extends Plugin {
           preview.length > 500 ? `${preview.slice(0, 500)}…` : preview;
         this.setSyncStatusFailed();
         new Notice('同步失败，请检查网络后重试', 10000);
-        if (isAuto) console.log('[auto-sync] failed');
         return;
       }
       this.lastSyncAt = Date.now();
       this.lastSyncError = null;
       this.setSyncStatusSuccess();
       new Notice('同步完成');
-      if (isAuto) console.log('[auto-sync] success');
     } catch (e) {
       this.setSyncStatusFailed();
       if (isNetworkError(e)) {
@@ -2419,7 +2388,6 @@ export default class ObsidianSyncPlugin extends Plugin {
         this.lastSyncError = msg;
         new Notice('同步失败，请检查网络后重试', 8000);
       }
-      if (isAuto) console.log('[auto-sync] failed');
     } finally {
       this.syncRunning = false;
       this.syncCooldownUntil = Date.now() + SYNC_COOLDOWN_MS;

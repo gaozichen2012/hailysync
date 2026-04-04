@@ -49,8 +49,6 @@ async function main(): Promise<void> {
     emptyKekFailed = true;
   }
   if (!emptyKekFailed) throw new Error('empty binding must fail');
-
-  console.log('e2ee-selftest OK');
 }
 
 main().catch((e) => {

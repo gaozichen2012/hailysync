@@ -18332,7 +18332,7 @@ var HailySyncSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     const debugDetails = advBody.createEl("details", { cls: "vault-sync-debug-details" });
-    debugDetails.createEl("summary", { text: "\u8C03\u8BD5\u4FE1\u606F\uFF08\u5C55\u5F00\uFF09" });
+    debugDetails.createEl("summary", { text: "\u8FDE\u63A5\u4FE1\u606F\uFF08\u7528\u6237 ID\u3001\u8BBE\u5907 ID\u3001\u670D\u52A1\u5668\uFF09" });
     this.debugIdentityEl = debugDetails.createDiv({ cls: "vault-sync-debug-identity" });
     debugDetails.addEventListener("toggle", () => {
       if (debugDetails.open) {
@@ -19007,11 +19007,10 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
     try {
       data = JSON.parse(s);
     } catch (e) {
-      console.error("JSON parse failed", e);
+      console.error("[HailySync] JSON parse failed for /files", e);
       throw new Error("/files \u54CD\u5E94\u4E0D\u662F\u5408\u6CD5 JSON");
     }
     const remoteFiles = parseRemoteFilesItems(data);
-    console.log("/files items \u2192 paths:", Object.keys(remoteFiles).length);
     return remoteFiles;
   }
   async uploadFile(filePath, meta) {
@@ -19032,7 +19031,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       );
       const cipher_hash = await sha256HexOfBytes(wire);
       const cipher_size = wire.length;
-      console.log("upload e2ee:", normalized, plain.length, cipher_hash);
       const updated_at = Date.now();
       const form = new FormData();
       const basename = normalized.includes("/") ? normalized.slice(normalized.lastIndexOf("/") + 1) : normalized;
@@ -19065,7 +19063,7 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         plain_fingerprint: plainFp
       };
     } catch (err) {
-      console.error("upload failed:", normalized, err);
+      console.error("[HailySync] upload failed:", normalized, err);
       throw err;
     }
   }
@@ -19110,12 +19108,11 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         vault_key_version: remote.vault_key_version,
         plain_fingerprint: plainFp
       };
-      console.log("download e2ee:", normalized, content.length, plainFp);
     } catch (err) {
       if (isAxiosError2(err) && err.response?.status === 404) {
         throw new Error(`\u4E0B\u8F7D\u5931\u8D25\uFF1A\u8FDC\u7AEF\u65E0\u6B64\u6587\u4EF6 (HTTP 404) \xB7 ${normalized}`);
       }
-      console.error("download failed:", normalized, err);
+      console.error("[HailySync] download failed:", normalized, err);
       throw err;
     }
   }
@@ -19150,7 +19147,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
       } else {
         await this.app.vault.create(conflictPath, content);
       }
-      console.log("sync decision:", normalized, "conflict", "WROTE_CONFLICT_COPY", conflictPath);
     } catch (err) {
       if (isAxiosError2(err) && err.response?.status === 404) {
         throw new Error(`\u51B2\u7A81\u526F\u672C\u4E0B\u8F7D\u5931\u8D25\uFF1A\u8FDC\u7AEF\u65E0\u6B64\u6587\u4EF6 (HTTP 404) \xB7 ${normalized}`);
@@ -19202,7 +19198,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         this.lastSyncError = "\u540C\u6B65\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F\u81EA\u52A8\u540C\u6B65";
         this.setSyncStatusFailed();
         new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5");
-        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
       const server = this.baseUrl;
@@ -19210,7 +19205,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         this.lastSyncError = "\u65E0\u6548\u7684\u670D\u52A1\u5668\u5730\u5740";
         this.setSyncStatusFailed();
         new import_obsidian.Notice("\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC");
-        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
       if (!this.deviceId || this.connectionState !== "connected") {
@@ -19221,7 +19215,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         } else {
           new import_obsidian.Notice("\u8BBE\u5907\u7ED1\u5B9A\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u7ED1\u5B9A\u7801\u6B63\u786E", 8e3);
         }
-        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
       try {
@@ -19232,7 +19225,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           this.lastSyncError = "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65";
           this.setSyncStatusFailed();
           new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
-          if (isAuto) console.log("[auto-sync] failed");
           return;
         }
         this.lastSyncError = formatSyncError(e);
@@ -19244,10 +19236,8 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         } else {
           new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 12e3);
         }
-        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
-      if (isAuto) console.log("[auto-sync] start");
       this.setSyncStatusSyncing();
       new import_obsidian.Notice("\u6B63\u5728\u540C\u6B65\u2026");
       const meta = await this.loadMeta();
@@ -19263,7 +19253,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           this.lastSyncError = "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65";
           this.setSyncStatusFailed();
           new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
-          if (isAuto) console.log("[auto-sync] failed");
           return;
         }
         this.setSyncStatusFailed();
@@ -19275,7 +19264,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           this.lastSyncError = `\u65E0\u6CD5\u83B7\u53D6\u7B14\u8BB0\u5217\u8868\uFF1A${detail}`;
           new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 8e3);
         }
-        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
       const localPaths = this.listLocalFiles();
@@ -19309,11 +19297,9 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
           if (remoteDeleted) {
             if (localExists) {
               if (!meta[path]) {
-                console.log("sync decision:", path, "upload", "LOCAL_NEW_REMOTE_TOMBSTONE");
                 await this.uploadFile(path, meta);
                 continue;
               }
-              console.log("sync decision:", path, "delete_local", "REMOTE_DELETED");
               await this.deleteLocalFile(path);
             }
             delete meta[path];
@@ -19324,29 +19310,20 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
               delete meta[path];
               continue;
             }
-            console.log("sync decision:", path, "post_delete_remote", "LOCAL_DELETED");
             await this.postDeleteRemote(path);
             delete meta[path];
             continue;
           }
           if (localExists) {
             if (localPlainFp === null) {
-              console.log("sync decision:", path, "noop", "read_failed");
               continue;
             }
-            console.log("compare:", {
-              filePath: path,
-              localPlainFp,
-              remoteCipher: r?.cipher_hash
-            });
             if (!r) {
-              console.log("sync decision:", path, "upload", "LOCAL_NEW");
               await this.uploadFile(path, meta);
               continue;
             }
             const remoteCipherStr = typeof r.cipher_hash === "string" ? r.cipher_hash.toLowerCase() : "";
             if (remoteCipherStr === "" || r.encryption_version !== ENCRYPTION_VERSION_WIRE) {
-              console.log("sync decision:", path, "noop", "remote_cipher_or_enc_invalid");
               continue;
             }
             const baseCipherRaw = meta[path]?.cipher_hash;
@@ -19354,7 +19331,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
             const basePlain = meta[path]?.plain_fingerprint ?? "";
             const hasBase = baseCipherStr.length > 0;
             if (hasBase && baseCipherStr === remoteCipherStr && basePlain === localPlainFp) {
-              console.log("sync decision:", path, "noop", "SYNCED");
               meta[path] = {
                 cipher_hash: remoteCipherStr,
                 cipher_size: r.cipher_size,
@@ -19367,26 +19343,21 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
               continue;
             }
             if (hasBase && basePlain !== localPlainFp && baseCipherStr !== remoteCipherStr) {
-              console.log("sync decision:", path, "conflict", "BOTH_MODIFIED");
               await this.writeConflictFromRemote(path, r);
               continue;
             }
             if (hasBase && basePlain === localPlainFp && baseCipherStr !== remoteCipherStr) {
-              console.log("sync decision:", path, "download", "REMOTE_MODIFIED");
               await this.downloadFile(path, meta, r);
               continue;
             }
             if (hasBase && baseCipherStr === remoteCipherStr && basePlain !== localPlainFp) {
-              console.log("sync decision:", path, "upload", "LOCAL_MODIFIED");
               await this.uploadFile(path, meta);
               continue;
             }
-            console.log("sync decision:", path, "upload", "LOCAL_MODIFIED_OR_NO_BASE");
             await this.uploadFile(path, meta);
             continue;
           }
           if (r) {
-            console.log("sync decision:", path, "download", "REMOTE_NEW");
             await this.downloadFile(path, meta, r);
             continue;
           }
@@ -19396,10 +19367,9 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
             this.lastSyncError = "\u5F53\u524D\u8BBE\u5907\u5DF2\u88AB\u79FB\u9664\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65";
             this.setSyncStatusFailed();
             new import_obsidian.Notice("\u8BF7\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u4EE5\u6062\u590D\u8FDE\u63A5", 12e3);
-            if (isAuto) console.log("[auto-sync] failed");
             return;
           }
-          console.error("sync step failed:", path, e);
+          console.error("[HailySync] sync step failed:", path, e);
           stepErrors.push(`${path}: ${formatSyncError(e)}`);
         }
       }
@@ -19409,14 +19379,12 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         this.lastSyncError = preview.length > 500 ? `${preview.slice(0, 500)}\u2026` : preview;
         this.setSyncStatusFailed();
         new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 1e4);
-        if (isAuto) console.log("[auto-sync] failed");
         return;
       }
       this.lastSyncAt = Date.now();
       this.lastSyncError = null;
       this.setSyncStatusSuccess();
       new import_obsidian.Notice("\u540C\u6B65\u5B8C\u6210");
-      if (isAuto) console.log("[auto-sync] success");
     } catch (e) {
       this.setSyncStatusFailed();
       if (isNetworkError(e)) {
@@ -19427,7 +19395,6 @@ var ObsidianSyncPlugin = class extends import_obsidian.Plugin {
         this.lastSyncError = msg;
         new import_obsidian.Notice("\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5", 8e3);
       }
-      if (isAuto) console.log("[auto-sync] failed");
     } finally {
       this.syncRunning = false;
       this.syncCooldownUntil = Date.now() + SYNC_COOLDOWN_MS;
