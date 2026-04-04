@@ -958,12 +958,14 @@ class HailySyncSettingTab extends PluginSettingTab {
     this.syncStatusContainerEl = null;
     this.debugIdentityEl = null;
 
-    const root = containerEl.createDiv({ cls: 'hailysync-settings-root' });
+    const container = containerEl.createDiv({ cls: 'hailysync-container' });
 
-    const titleRow = root.createDiv({ cls: 'hailysync-settings-title' });
+    const titleRow = container.createDiv({ cls: 'hailysync-settings-title' });
     titleRow.createEl('h2', { text: '海狸同步 HailySync' });
 
-    const syncWrap = root.createDiv({ cls: 'vault-sync-section vault-sync-sync-status-section' });
+    const syncWrap = container.createDiv({
+      cls: 'hailysync-card vault-sync-section vault-sync-sync-status-section',
+    });
     syncWrap.createEl('div', { cls: 'vault-sync-section-label', text: '同步状态' });
     this.syncStatusContainerEl = syncWrap.createDiv({ cls: 'vault-sync-sync-status' });
     this.fillSyncStatusSection(this.syncStatusContainerEl);
@@ -972,7 +974,9 @@ class HailySyncSettingTab extends PluginSettingTab {
       this.refreshSyncStatusPanel();
     }, 1000);
 
-    const bindingBlock = root.createDiv({ cls: 'vault-sync-binding-card' });
+    const bindingBlock = container.createDiv({
+      cls: 'hailysync-card vault-sync-binding-card',
+    });
     new Setting(bindingBlock)
       .setName('设备绑定码（用于连接新设备，请妥善保存）')
       .addButton((btn) =>
@@ -994,7 +998,9 @@ class HailySyncSettingTab extends PluginSettingTab {
     this.renderBindingPanel();
 
     let bindingInput: HTMLInputElement | null = null;
-    const bindNewBlock = root.createDiv({ cls: 'vault-sync-section vault-sync-bind-block' });
+    const bindNewBlock = container.createDiv({
+      cls: 'hailysync-card vault-sync-section vault-sync-bind-block',
+    });
     new Setting(bindNewBlock)
       .setName('绑定新设备')
       .setDesc('输入设备绑定码即可连接')
@@ -1034,7 +1040,9 @@ class HailySyncSettingTab extends PluginSettingTab {
         });
       });
 
-    const devBlock = root.createDiv({ cls: 'vault-sync-devices-block vault-sync-section' });
+    const devBlock = container.createDiv({
+      cls: 'hailysync-card vault-sync-devices-block vault-sync-section',
+    });
     new Setting(devBlock)
       .setName('已绑定设备')
       .setDesc('当前设备不可移除')
@@ -1047,7 +1055,8 @@ class HailySyncSettingTab extends PluginSettingTab {
     this.deviceListEl = devBlock.createDiv({ cls: 'vault-sync-device-list' });
     this.renderDeviceList();
 
-    new Setting(root)
+    const autoSyncCard = container.createDiv({ cls: 'hailysync-card' });
+    new Setting(autoSyncCard)
       .setName('自动同步（推荐开启）')
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.enableSync).onChange(async (value) => {
@@ -1056,7 +1065,8 @@ class HailySyncSettingTab extends PluginSettingTab {
         }),
       );
 
-    new Setting(root)
+    const manualSyncCard = container.createDiv({ cls: 'hailysync-card' });
+    new Setting(manualSyncCard)
       .setName('手动同步')
       .setDesc('立即执行一次同步')
       .addButton((btn) => {
@@ -1087,7 +1097,7 @@ class HailySyncSettingTab extends PluginSettingTab {
         });
       });
 
-    const advanced = root.createEl('details', { cls: 'vault-sync-advanced' });
+    const advanced = container.createEl('details', { cls: 'vault-sync-advanced' });
     advanced.createEl('summary', { text: '高级设置' });
     const advBody = advanced.createDiv({ cls: 'vault-sync-advanced-body' });
     new Setting(advBody)
