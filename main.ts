@@ -864,7 +864,7 @@ class HailySyncSettingTab extends PluginSettingTab {
     }
   }
 
-  private async onResetBinding(): Promise<void> {
+  private onResetBinding(): void {
     if (!this.plugin.deviceId) {
       new Notice('请先完成连接后再试');
       return;
@@ -1020,8 +1020,6 @@ class HailySyncSettingTab extends PluginSettingTab {
     this.debugIdentityEl = null;
 
     const container = containerEl.createDiv({ cls: 'hailysync-container' });
-
-    new Setting(container).setName('海狸同步 HailySync').setHeading();
 
     const syncWrap = container.createDiv({
       cls: 'hailysync-card vault-sync-section vault-sync-sync-status-section',

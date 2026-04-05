@@ -254,7 +254,6 @@ export async function decryptWireToPlain(
 
 export function assertEnvelopeShape(e: unknown): asserts e is VaultEnvelopeJson {
   if (!isPlainObject(e)) throw new Error('E2EE_ENVELOPE_SHAPE');
-  const o = e as Record<string, unknown>;
   const need: (keyof VaultEnvelopeJson)[] = [
     'envelope_version',
     'algorithm',
@@ -266,7 +265,7 @@ export function assertEnvelopeShape(e: unknown): asserts e is VaultEnvelopeJson 
     'vault_key_version',
   ];
   for (const k of need) {
-    if (!(k in o)) throw new Error(`E2EE_ENVELOPE_MISSING:${k}`);
+    if (!(k in e)) throw new Error(`E2EE_ENVELOPE_MISSING:${k}`);
   }
 }
 

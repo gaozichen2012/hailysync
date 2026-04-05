@@ -31,7 +31,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
       (err: unknown) => {
         window.clearTimeout(id);
-        reject(err);
+        reject(err instanceof Error ? err : new Error(String(err)));
       },
     );
   });
@@ -92,7 +92,7 @@ export function httpErrorFromResponse(res: SyncHttpResult): HttpRequestError {
   const t = res.text.trim();
   if (t.startsWith('{')) {
     try {
-      responseData = JSON.parse(t) as unknown;
+      responseData = JSON.parse(t);
     } catch {
       /* keep text */
     }

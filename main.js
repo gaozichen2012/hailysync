@@ -2792,7 +2792,6 @@ async function decryptWireToPlain(wire, relativePath, vaultKey) {
 }
 function assertEnvelopeShape(e) {
   if (!isPlainObject(e)) throw new Error("E2EE_ENVELOPE_SHAPE");
-  const o = e;
   const need = [
     "envelope_version",
     "algorithm",
@@ -2804,7 +2803,7 @@ function assertEnvelopeShape(e) {
     "vault_key_version"
   ];
   for (const k of need) {
-    if (!(k in o)) throw new Error(`E2EE_ENVELOPE_MISSING:${k}`);
+    if (!(k in e)) throw new Error(`E2EE_ENVELOPE_MISSING:${k}`);
   }
 }
 function isPlainObject(v) {
@@ -2840,7 +2839,7 @@ function withTimeout(promise, ms) {
       },
       (err) => {
         window.clearTimeout(id);
-        reject(err);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     );
   });
@@ -3604,7 +3603,7 @@ var HailySyncSettingTab = class extends import_obsidian2.PluginSettingTab {
       this.renderBindingPanel();
     }
   }
-  async onResetBinding() {
+  onResetBinding() {
     if (!this.plugin.deviceId) {
       new import_obsidian2.Notice("\u8BF7\u5148\u5B8C\u6210\u8FDE\u63A5\u540E\u518D\u8BD5");
       return;
@@ -3750,7 +3749,6 @@ var HailySyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     this.syncStatusContainerEl = null;
     this.debugIdentityEl = null;
     const container = containerEl.createDiv({ cls: "hailysync-container" });
-    new import_obsidian2.Setting(container).setName("\u6D77\u72F8\u540C\u6B65 HailySync").setHeading();
     const syncWrap = container.createDiv({
       cls: "hailysync-card vault-sync-section vault-sync-sync-status-section"
     });
