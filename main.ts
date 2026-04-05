@@ -105,7 +105,7 @@ function normalizeVaultPath(p: string): string {
     .join('/');
 }
 
-/** vault 配置目录（通常为 `.obsidian`，以 Vault#configDir 为准） */
+/** 路径是否落在 Obsidian vault 配置目录下（路径取自 `Vault#configDir`，勿手写目录名） */
 function pathUnderVaultConfig(normalizedPath: string, vaultConfigDir: string): boolean {
   const cfg = normalizeVaultPath(vaultConfigDir);
   if (!cfg) return false;
@@ -298,8 +298,8 @@ function parseDevicesListPayload(data: unknown): ApiDeviceRow[] {
     if (!isPlainObjectRecord(item)) continue;
     const id = item.device_id;
     if (typeof id !== 'string' || !id.trim()) continue;
-    const name = coerceApiStringField(item.device_name);
-    const typ = coerceApiStringField(item.device_type);
+    const deviceNameStr = coerceApiStringField(item.device_name);
+    const deviceTypeStr = coerceApiStringField(item.device_type);
     const la = item.last_active_at ?? item['last_seen_at'];
     let lastAt: number | null = null;
     if (typeof la === 'number' && Number.isFinite(la)) lastAt = la;
@@ -309,8 +309,8 @@ function parseDevicesListPayload(data: unknown): ApiDeviceRow[] {
     }
     rows.push({
       device_id: id.trim(),
-      device_name: name,
-      device_type: typ,
+      device_name: deviceNameStr,
+      device_type: deviceTypeStr,
       last_active_at: lastAt,
     });
   }

@@ -3123,8 +3123,8 @@ function parseDevicesListPayload(data) {
     if (!isPlainObjectRecord(item)) continue;
     const id = item.device_id;
     if (typeof id !== "string" || !id.trim()) continue;
-    const name = coerceApiStringField(item.device_name);
-    const typ = coerceApiStringField(item.device_type);
+    const deviceNameStr = coerceApiStringField(item.device_name);
+    const deviceTypeStr = coerceApiStringField(item.device_type);
     const la = item.last_active_at ?? item["last_seen_at"];
     let lastAt = null;
     if (typeof la === "number" && Number.isFinite(la)) lastAt = la;
@@ -3134,8 +3134,8 @@ function parseDevicesListPayload(data) {
     }
     rows.push({
       device_id: id.trim(),
-      device_name: name,
-      device_type: typ,
+      device_name: deviceNameStr,
+      device_type: deviceTypeStr,
       last_active_at: lastAt
     });
   }
