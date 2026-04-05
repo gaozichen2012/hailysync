@@ -1,5 +1,6 @@
 import {
   App,
+  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -7,7 +8,6 @@ import {
   TFile,
 } from 'obsidian';
 import type { Vault } from 'obsidian';
-import axios, { isAxiosError } from 'axios';
 import md5 from 'blueimp-md5';
 import { hostname, platform } from 'os';
 import {
@@ -25,6 +25,14 @@ import {
   wrapVaultKeyToEnvelope,
   type VaultEnvelopeJson,
 } from './crypto-e2ee';
+import {
+  appendQueryUrl,
+  buildMultipartFormData,
+  headerGet,
+  httpErrorFromResponse,
+  isHttpRequestError,
+  syncHttpRequest,
+} from './sync-http';
 
 /** 与 sync-server /files 及本地 .sync_meta.json 一致（E2EE） */
 interface SyncFileMeta {
@@ -97,12 +105,20 @@ function normalizeVaultPath(p: string): string {
     .join('/');
 }
 
+/** vault 配置目录（通常为 `.obsidian`，以 Vault#configDir 为准） */
+function pathUnderVaultConfig(normalizedPath: string, vaultConfigDir: string): boolean {
+  const cfg = normalizeVaultPath(vaultConfigDir);
+  if (!cfg) return false;
+  const p = normalizedPath;
+  return p === cfg || p.startsWith(`${cfg}/`);
+}
+
 /** 不参与同步的路径（隐藏项、配置目录、同步元数据） */
-function shouldSync(filePath: string): boolean {
+function shouldSync(filePath: string, vaultConfigDir: string): boolean {
   if (!filePath) return false;
   const p = normalizeVaultPath(filePath);
   if (p.startsWith('.')) return false;
-  if (p.includes('.obsidian')) return false;
+  if (pathUnderVaultConfig(p, vaultConfigDir)) return false;
   if (p === SYNC_META_FILENAME || p.endsWith(`/${SYNC_META_FILENAME}`)) return false;
   if (p === SYNC_CONFIG_FILENAME || p.endsWith(`/${SYNC_CONFIG_FILENAME}`)) return false;
   if (p === SYNC_CRYPTO_FILENAME || p.endsWith(`/${SYNC_CRYPTO_FILENAME}`)) return false;
@@ -116,7 +132,7 @@ function isPlainObjectRecord(v: unknown): v is Record<string, unknown> {
 /**
  * GET /files：冻结协议 { items: [...] }，deleted=true 时 cipher_hash/cipher_size 为 null。
  */
-function parseRemoteFilesItems(parsed: unknown): SyncMetaMap {
+function parseRemoteFilesItems(parsed: unknown, vaultConfigDir: string): SyncMetaMap {
   if (!isPlainObjectRecord(parsed)) throw new Error('/files 响应必须为 JSON 对象');
   const items = parsed.items;
   if (!Array.isArray(items)) throw new Error('/files 必须为 { items: array }');
@@ -132,7 +148,7 @@ function parseRemoteFilesItems(parsed: unknown): SyncMetaMap {
       throw new Error('/files 某项缺少 relative_path');
     }
     const path = normalizeVaultPath(rp);
-    if (!shouldSync(path)) continue;
+    if (!shouldSync(path, vaultConfigDir)) continue;
 
     const updatedRaw = rawItem.updated_at;
     const updated_at =
@@ -257,6 +273,20 @@ function extractBindingCodeFromJson(data: unknown): string | null {
   return null;
 }
 
+/** API 偶发返回嵌套对象时用具体字段，避免出现 [object Object] */
+function coerceApiStringField(v: unknown): string {
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  if (isPlainObjectRecord(v)) {
+    for (const key of ['name', 'label', 'value', 'text', 'displayName'] as const) {
+      const inner = v[key];
+      if (typeof inner === 'string' && inner.trim()) return inner.trim();
+      if (typeof inner === 'number' && Number.isFinite(inner)) return String(inner);
+    }
+  }
+  return '';
+}
+
 function parseDevicesListPayload(data: unknown): ApiDeviceRow[] {
   const rows: ApiDeviceRow[] = [];
   let arr: unknown[] = [];
@@ -268,8 +298,8 @@ function parseDevicesListPayload(data: unknown): ApiDeviceRow[] {
     if (!isPlainObjectRecord(item)) continue;
     const id = item.device_id;
     if (typeof id !== 'string' || !id.trim()) continue;
-    const name = item.device_name ?? '';
-    const typ = item.device_type ?? '';
+    const name = coerceApiStringField(item.device_name);
+    const typ = coerceApiStringField(item.device_type);
     const la = item.last_active_at ?? item['last_seen_at'];
     let lastAt: number | null = null;
     if (typeof la === 'number' && Number.isFinite(la)) lastAt = la;
@@ -279,8 +309,8 @@ function parseDevicesListPayload(data: unknown): ApiDeviceRow[] {
     }
     rows.push({
       device_id: id.trim(),
-      device_name: typeof name === 'string' ? name : String(name),
-      device_type: typeof typ === 'string' ? typ : String(typ),
+      device_name: name,
+      device_type: typ,
       last_active_at: lastAt,
     });
   }
@@ -288,10 +318,10 @@ function parseDevicesListPayload(data: unknown): ApiDeviceRow[] {
 }
 
 function isDeviceRevokedError(err: unknown): boolean {
-  if (!isAxiosError(err)) return false;
-  const data = err.response?.data;
-  if (isPlainObjectRecord(data as unknown) && typeof (data as { error?: unknown }).error === 'string') {
-    return (data as { error: string }).error === 'DEVICE_REVOKED';
+  if (!isHttpRequestError(err)) return false;
+  const data = err.responseData;
+  if (isPlainObjectRecord(data) && typeof data.error === 'string') {
+    return data.error === 'DEVICE_REVOKED';
   }
   if (typeof data === 'string' && data.trim()) {
     try {
@@ -307,11 +337,9 @@ function isDeviceRevokedError(err: unknown): boolean {
 }
 
 function isNetworkError(err: unknown): boolean {
-  if (!isAxiosError(err)) return false;
-  if (err.code === 'ECONNABORTED') return true;
-  /** axios 超时时 message 可能含 timeout */
+  if (!isHttpRequestError(err)) return false;
+  if (err.code === 'ETIMEDOUT' || err.code === 'ENETWORK') return true;
   if (typeof err.message === 'string' && /timeout/i.test(err.message)) return true;
-  if (!err.response) return true;
   return false;
 }
 
@@ -325,6 +353,14 @@ const DEFAULT_SETTINGS: SyncPluginSettings = {
   serverUrl: BUILTIN_DEFAULT_SERVER_URL,
   enableSync: true,
 };
+
+function parsePartialSettingsData(raw: unknown): Partial<SyncPluginSettings> {
+  if (!isPlainObjectRecord(raw)) return {};
+  const out: Partial<SyncPluginSettings> = {};
+  if (typeof raw.serverUrl === 'string') out.serverUrl = raw.serverUrl;
+  if (typeof raw.enableSync === 'boolean') out.enableSync = raw.enableSync;
+  return out;
+}
 
 /** 最近同步时间等：3 秒前、2 分钟前 */
 function formatRelativeTimeShort(ts: number): string {
@@ -372,12 +408,14 @@ function humanizeKnownUploadErrorText(raw: string): string {
 }
 
 /** 拒绝把 JSON 下载链接或非标 body 当密文写入 vault */
-/** axios `arraybuffer` 在部分环境下可能为 Buffer / TypedArray，统一为独立 ArrayBuffer */
+/** 下载体在部分环境下可能为 TypedArray，统一为独立 ArrayBuffer */
 function httpResponseBodyToArrayBuffer(data: unknown): ArrayBuffer {
   if (data instanceof ArrayBuffer) return data;
   if (ArrayBuffer.isView(data)) {
-    const v = data as ArrayBufferView;
-    return v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength);
+    const v = data;
+    const copy = new Uint8Array(v.byteLength);
+    copy.set(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+    return copy.buffer;
   }
   throw new Error('下载响应 body 无法转为 ArrayBuffer');
 }
@@ -421,23 +459,15 @@ function assertDownloadWireResponse(
 const HTTP_TIMEOUT_MS = 12_000;
 const HTTP_TRANSFER_TIMEOUT_MS = 120_000;
 
-const AXIOS_TIMEOUT_DEFAULTS = { timeout: HTTP_TIMEOUT_MS };
-
-const AXIOS_LARGE_FILE_DEFAULTS = {
-  maxBodyLength: Infinity as number,
-  maxContentLength: Infinity as number,
-  timeout: HTTP_TRANSFER_TIMEOUT_MS,
-};
-
 function formatSyncError(err: unknown): string {
-  if (isAxiosError(err)) {
-    if (err.response?.status === 413) {
+  if (isHttpRequestError(err)) {
+    if (err.status === 413) {
       return '文件过大，已超过服务端允许的大小限制';
     }
-    if (err.response?.status === 404) {
+    if (err.status === 404) {
       return '资源不存在 (HTTP 404)';
     }
-    const data = err.response?.data;
+    const data = err.responseData;
     if (data instanceof ArrayBuffer && data.byteLength > 0 && data.byteLength <= 4096) {
       const s = new TextDecoder('utf-8', { fatal: false }).decode(data);
       const t = s.trim();
@@ -473,22 +503,46 @@ function formatSyncError(err: unknown): string {
       }
       if (s.length <= 200) return humanizeKnownUploadErrorText(s);
     }
-    if (isPlainObjectRecord(data as unknown)) {
-      const msg = (data as { message?: unknown }).message;
+    if (isPlainObjectRecord(data)) {
+      const msg = data.message;
       if (typeof msg === 'string' && msg.trim())
         return humanizeKnownUploadErrorText(msg.trim());
-      const errMsg = (data as { error?: unknown }).error;
+      const errMsg = data.error;
       if (typeof errMsg === 'string' && errMsg.trim())
         return humanizeKnownUploadErrorText(errMsg.trim());
     }
     const parts: string[] = [];
     if (err.code) parts.push(err.code);
-    if (err.response?.status) parts.push(`HTTP ${err.response.status}`);
+    if (err.status != null) parts.push(`HTTP ${err.status}`);
     if (err.message) parts.push(err.message);
     return parts.length > 0 ? parts.join(' · ') : '网络请求失败';
   }
   if (err instanceof Error && err.message) return err.message;
   return String(err);
+}
+
+class ConfirmModal extends Modal {
+  constructor(
+    app: App,
+    private readonly message: string,
+    private readonly onConfirm: () => void,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('p', { text: this.message });
+    const btns = contentEl.createDiv({ cls: 'modal-button-container' });
+    btns.createEl('button', { text: '取消' }).addEventListener('click', () => this.close());
+    btns
+      .createEl('button', { text: '确定', cls: 'mod-cta' })
+      .addEventListener('click', () => {
+        this.close();
+        this.onConfirm();
+      });
+  }
 }
 
 class HailySyncSettingTab extends PluginSettingTab {
@@ -815,13 +869,16 @@ class HailySyncSettingTab extends PluginSettingTab {
       new Notice('请先完成连接后再试');
       return;
     }
-    if (
-      !window.confirm(
-        '重置后，旧的设备绑定码将立即失效，其他设备需使用新绑定码才能继续连接。\n\n确定要重置吗？',
-      )
-    ) {
-      return;
-    }
+    new ConfirmModal(
+      this.app,
+      '重置后，旧的设备绑定码将立即失效，其他设备需使用新绑定码才能继续连接。\n\n确定要重置吗？',
+      () => {
+        void this.runResetBindingAfterConfirm();
+      },
+    ).open();
+  }
+
+  private async runResetBindingAfterConfirm(): Promise<void> {
     this.clearBindingTimers();
     this.revealedFullCode = null;
     this.revealExpireAt = null;
@@ -902,15 +959,16 @@ class HailySyncSettingTab extends PluginSettingTab {
         const btn = tdOp.createEl('button', { cls: 'vault-sync-binding-copy-btn', text: '删除' });
         btn.type = 'button';
         btn.addEventListener('click', () => {
-          if (
-            window.confirm(
-              `移除后，该设备将无法继续同步，需重新输入设备绑定码才能连接。\n\n确定移除「${d.device_name || '该设备'}」吗？`,
-            )
-          ) {
-            void this.plugin.deleteDeviceOnServer(d.device_id).then((ok) => {
-              if (ok) void this.reloadDevices();
-            });
-          }
+          const label = (d.device_name || '该设备').trim() || '该设备';
+          new ConfirmModal(
+            this.app,
+            `移除后，该设备将无法继续同步，需重新输入设备绑定码才能连接。\n\n确定移除「${label}」吗？`,
+            () => {
+              void this.plugin.deleteDeviceOnServer(d.device_id).then((ok) => {
+                if (ok) void this.reloadDevices();
+              });
+            },
+          ).open();
         });
       } else {
         tdOp.createSpan({ cls: 'setting-item-description', text: '不可移除' });
@@ -963,8 +1021,7 @@ class HailySyncSettingTab extends PluginSettingTab {
 
     const container = containerEl.createDiv({ cls: 'hailysync-container' });
 
-    const titleRow = container.createDiv({ cls: 'hailysync-settings-title' });
-    titleRow.createEl('h2', { text: '海狸同步 HailySync' });
+    new Setting(container).setName('海狸同步 HailySync').setHeading();
 
     const syncWrap = container.createDiv({
       cls: 'hailysync-card vault-sync-section vault-sync-sync-status-section',
@@ -1200,7 +1257,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 
     try {
       this.addCommand({
-        id: 'hailysync-sync-now',
+        id: 'sync-now',
         name: '立即同步',
         callback: () => {
           void this.syncNow();
@@ -1291,7 +1348,7 @@ export default class ObsidianSyncPlugin extends Plugin {
   async loadSettings() {
     let loaded: Partial<SyncPluginSettings> = {};
     try {
-      loaded = (await this.loadData()) as Partial<SyncPluginSettings>;
+      loaded = parsePartialSettingsData(await this.loadData());
     } catch (e) {
       console.error('[HailySync] loadData failed', e);
     }
@@ -1349,7 +1406,7 @@ export default class ObsidianSyncPlugin extends Plugin {
     this.vaultKeyVersion = 1;
     try {
       const exists = this.app.vault.getAbstractFileByPath(SYNC_CRYPTO_FILENAME);
-      if (exists instanceof TFile) await this.app.vault.delete(exists);
+      if (exists instanceof TFile) await this.app.fileManager.trashFile(exists);
     } catch {
       /* ignore */
     }
@@ -1359,18 +1416,19 @@ export default class ObsidianSyncPlugin extends Plugin {
     kek_salt: string;
     kek_derivation_version: number;
     vault_key_version: number;
-    envelope: VaultEnvelopeJson;
+    envelope: unknown;
   }): void {
     assertEnvelopeShape(data.envelope);
-    if (data.envelope.kek_salt !== data.kek_salt) throw new Error('E2EE_BIND_KEK_SALT_MISMATCH');
-    if (data.envelope.kek_derivation_version !== data.kek_derivation_version) {
+    const env = data.envelope;
+    if (env.kek_salt !== data.kek_salt) throw new Error('E2EE_BIND_KEK_SALT_MISMATCH');
+    if (env.kek_derivation_version !== data.kek_derivation_version) {
       throw new Error('E2EE_BIND_KEK_DERIVATION_MISMATCH');
     }
-    if (data.envelope.vault_key_version !== data.vault_key_version) {
+    if (env.vault_key_version !== data.vault_key_version) {
       throw new Error('E2EE_BIND_VAULT_KEY_VERSION_MISMATCH');
     }
-    if (data.envelope.envelope_version !== 1) throw new Error('E2EE_BIND_ENVELOPE_VERSION');
-    if (data.envelope.algorithm !== 'AES-256-GCM') throw new Error('E2EE_BIND_ENVELOPE_ALGORITHM');
+    if (env.envelope_version !== 1) throw new Error('E2EE_BIND_ENVELOPE_VERSION');
+    if (env.algorithm !== 'AES-256-GCM') throw new Error('E2EE_BIND_ENVELOPE_ALGORITHM');
   }
 
   /** 首设备：用 init 返回的 binding_code 派生 KEK、PUT envelope、落盘 vault_key */
@@ -1391,10 +1449,15 @@ export default class ObsidianSyncPlugin extends Plugin {
       salt,
       vaultKeyVersion,
     );
-    await axios.put<VaultEnvelopeJson>(`${this.baseUrl}/api/vault/envelope`, envelope, {
+    const putEnv = await syncHttpRequest({
+      url: `${this.baseUrl}/api/vault/envelope`,
+      method: 'PUT',
       headers: this.syncApiHeaders(),
-      ...AXIOS_LARGE_FILE_DEFAULTS,
+      contentType: 'application/json',
+      body: JSON.stringify(envelope),
+      timeoutMs: HTTP_TRANSFER_TIMEOUT_MS,
     });
+    if (putEnv.status >= 400) throw httpErrorFromResponse(putEnv);
     await this.persistVaultKeyLocal(vaultKey, vaultKeyVersion);
   }
 
@@ -1411,15 +1474,23 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   /** GET /api/vault/envelope（与冻结协议字段一致） */
   async fetchVaultEnvelope(): Promise<VaultEnvelopeJson> {
-    const res = await axios.get<VaultEnvelopeJson>(`${this.baseUrl}/api/vault/envelope`, {
+    const res = await syncHttpRequest({
+      url: `${this.baseUrl}/api/vault/envelope`,
       headers: this.syncApiHeaders(),
-      ...AXIOS_TIMEOUT_DEFAULTS,
+      timeoutMs: HTTP_TIMEOUT_MS,
     });
-    if (!isPlainObjectRecord(res.data as unknown)) {
+    if (res.status >= 400) throw httpErrorFromResponse(res);
+    let data: unknown;
+    try {
+      data = JSON.parse(res.text) as unknown;
+    } catch {
       throw new Error('GET /api/vault/envelope 响应非法');
     }
-    assertEnvelopeShape(res.data);
-    return res.data;
+    if (!isPlainObjectRecord(data)) {
+      throw new Error('GET /api/vault/envelope 响应非法');
+    }
+    assertEnvelopeShape(data);
+    return data;
   }
 
   /** 404 → null；其余错误原样抛出（含 DEVICE_REVOKED） */
@@ -1428,7 +1499,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       return await this.fetchVaultEnvelope();
     } catch (e) {
       if (isDeviceRevokedError(e)) throw e;
-      if (isAxiosError(e) && e.response?.status === 404) return null;
+      if (isHttpRequestError(e) && e.status === 404) return null;
       throw e;
     }
   }
@@ -1567,21 +1638,31 @@ export default class ObsidianSyncPlugin extends Plugin {
       return;
     }
     try {
-      const res = await axios.post<{
-        user_id?: string;
-        device_id?: string;
-        binding_code?: string;
-      }>(
-        `${server}/api/init`,
-        {
+      const res = await syncHttpRequest({
+        url: `${server}/api/init`,
+        method: 'POST',
+        contentType: 'application/json',
+        body: JSON.stringify({
           device_name: getDeviceDisplayName(),
           device_type: getDeviceTypeLabel(),
-        },
-        { ...AXIOS_TIMEOUT_DEFAULTS },
-      );
-      const uid = res.data?.user_id;
-      const did = res.data?.device_id;
-      const bindingCode = res.data?.binding_code;
+        }),
+        timeoutMs: HTTP_TIMEOUT_MS,
+      });
+      if (res.status >= 400) throw httpErrorFromResponse(res);
+      let payload: unknown;
+      try {
+        payload = JSON.parse(res.text) as unknown;
+      } catch {
+        throw httpErrorFromResponse(res);
+      }
+      if (!isPlainObjectRecord(payload)) {
+        this.connectionState = 'awaiting_bind';
+        new Notice('同步失败，请检查网络后重试');
+        return;
+      }
+      const uid = payload.user_id;
+      const did = payload.device_id;
+      const bindingCode = payload.binding_code;
       if (typeof uid !== 'string' || !uid.trim() || typeof did !== 'string' || !did.trim()) {
         this.connectionState = 'awaiting_bind';
         new Notice('同步失败，请检查网络后重试');
@@ -1595,7 +1676,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       try {
         await this.persistFullIdentity(uid.trim(), did.trim(), bindingCode.trim());
         await this.bootstrapVaultFromInit(bindingCode);
-      } catch (e) {
+      } catch {
         await this.wipeVaultKeyLocal();
         this.userId = '';
         this.deviceId = '';
@@ -1677,11 +1758,19 @@ export default class ObsidianSyncPlugin extends Plugin {
     const server = this.baseUrl;
     if (!server) return null;
     try {
-      const res = await axios.get(`${server}/api/binding-code`, {
+      const res = await syncHttpRequest({
+        url: `${server}/api/binding-code`,
         headers: this.syncApiHeaders(),
-        ...AXIOS_TIMEOUT_DEFAULTS,
+        timeoutMs: HTTP_TIMEOUT_MS,
       });
-      return extractBindingCodeFromJson(res.data);
+      if (res.status >= 400) throw httpErrorFromResponse(res);
+      let data: unknown;
+      try {
+        data = JSON.parse(res.text) as unknown;
+      } catch {
+        return null;
+      }
+      return extractBindingCodeFromJson(data);
     } catch (e) {
       if (isDeviceRevokedError(e)) {
         await this.handleDeviceRevoked();
@@ -1701,11 +1790,15 @@ export default class ObsidianSyncPlugin extends Plugin {
     const server = this.baseUrl;
     if (!server) return false;
     try {
-      await axios.post(
-        `${server}/api/binding-code/reset`,
-        {},
-        { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS },
-      );
+      const res = await syncHttpRequest({
+        url: `${server}/api/binding-code/reset`,
+        method: 'POST',
+        headers: this.syncApiHeaders(),
+        contentType: 'application/json',
+        body: '{}',
+        timeoutMs: HTTP_TIMEOUT_MS,
+      });
+      if (res.status >= 400) throw httpErrorFromResponse(res);
       return true;
     } catch (e) {
       if (isDeviceRevokedError(e)) {
@@ -1726,11 +1819,19 @@ export default class ObsidianSyncPlugin extends Plugin {
   > {
     if (!this.deviceId) return { ok: true, devices: [] };
     try {
-      const res = await axios.get(`${this.baseUrl}/api/devices`, {
+      const res = await syncHttpRequest({
+        url: `${this.baseUrl}/api/devices`,
         headers: this.syncApiHeaders(),
-        ...AXIOS_TIMEOUT_DEFAULTS,
+        timeoutMs: HTTP_TIMEOUT_MS,
       });
-      const devices = parseDevicesListPayload(res.data);
+      if (res.status >= 400) throw httpErrorFromResponse(res);
+      let data: unknown;
+      try {
+        data = JSON.parse(res.text) as unknown;
+      } catch {
+        return { ok: true, devices: [] };
+      }
+      const devices = parseDevicesListPayload(data);
       return { ok: true, devices };
     } catch (e) {
       if (isDeviceRevokedError(e)) {
@@ -1748,11 +1849,15 @@ export default class ObsidianSyncPlugin extends Plugin {
     const server = this.baseUrl;
     if (!server) return false;
     try {
-      await axios.post(
-        `${server}/api/device/delete`,
-        { device_id: targetId },
-        { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS },
-      );
+      const res = await syncHttpRequest({
+        url: `${server}/api/device/delete`,
+        method: 'POST',
+        headers: this.syncApiHeaders(),
+        contentType: 'application/json',
+        body: JSON.stringify({ device_id: targetId }),
+        timeoutMs: HTTP_TIMEOUT_MS,
+      });
+      if (res.status >= 400) throw httpErrorFromResponse(res);
       new Notice('操作已完成');
       return true;
     } catch (e) {
@@ -1782,28 +1887,35 @@ export default class ObsidianSyncPlugin extends Plugin {
       return false;
     }
     try {
-      const res = await axios.post<{
-        user_id?: string;
-        device_id?: string;
-        kek_salt?: string;
-        kek_derivation_version?: number;
-        vault_key_version?: number;
-        envelope?: VaultEnvelopeJson;
-      }>(
-        `${server}/api/bind`,
-        {
+      const res = await syncHttpRequest({
+        url: `${server}/api/bind`,
+        method: 'POST',
+        contentType: 'application/json',
+        body: JSON.stringify({
           binding_code: code,
           device_name: getDeviceDisplayName(),
           device_type: getDeviceTypeLabel(),
-        },
-        { ...AXIOS_TIMEOUT_DEFAULTS },
-      );
-      const uid = res.data?.user_id;
-      const did = res.data?.device_id;
-      const kekSalt = res.data?.kek_salt;
-      const kekDv = res.data?.kek_derivation_version;
-      const vkv = res.data?.vault_key_version;
-      const envelope = res.data?.envelope;
+        }),
+        timeoutMs: HTTP_TIMEOUT_MS,
+      });
+      if (res.status >= 400) throw httpErrorFromResponse(res);
+      let data: unknown;
+      try {
+        data = JSON.parse(res.text) as unknown;
+      } catch {
+        new Notice('设备绑定失败，请确认绑定码正确');
+        return false;
+      }
+      if (!isPlainObjectRecord(data)) {
+        new Notice('设备绑定失败，请确认绑定码正确');
+        return false;
+      }
+      const uid = data.user_id;
+      const did = data.device_id;
+      const kekSalt = data.kek_salt;
+      const kekDv = data.kek_derivation_version;
+      const vkv = data.vault_key_version;
+      const envelope = data.envelope;
       if (typeof uid !== 'string' || !uid.trim() || typeof did !== 'string' || !did.trim()) {
         new Notice('设备绑定失败，请确认绑定码正确', 6000);
         return false;
@@ -1813,7 +1925,7 @@ export default class ObsidianSyncPlugin extends Plugin {
         typeof kekDv !== 'number' ||
         typeof vkv !== 'number' ||
         envelope == null ||
-        typeof envelope !== 'object'
+        !isPlainObjectRecord(envelope)
       ) {
         new Notice('设备绑定失败，请确认绑定码正确', 8000);
         return false;
@@ -1825,6 +1937,7 @@ export default class ObsidianSyncPlugin extends Plugin {
           vault_key_version: vkv,
           envelope,
         });
+        assertEnvelopeShape(envelope);
         await this.unlockVaultFromBindingCode(code, envelope);
       } catch (e) {
         console.error('[HailySync] bind unlock failed', e);
@@ -1855,10 +1968,9 @@ export default class ObsidianSyncPlugin extends Plugin {
     try {
       const content = await this.app.vault.adapter.read(SYNC_META_FILENAME);
       const parsed = JSON.parse(content || '{}') as unknown;
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const raw = parsed as Record<string, unknown>;
+      if (isPlainObjectRecord(parsed)) {
         const out: SyncMetaMap = {};
-        for (const [k, v] of Object.entries(raw)) {
+        for (const [k, v] of Object.entries(parsed)) {
           const path = normalizeVaultPath(k);
           if (!isPlainObjectRecord(v)) continue;
           const rec = v;
@@ -1896,25 +2008,22 @@ export default class ObsidianSyncPlugin extends Plugin {
 
   /** 本地待同步路径（已 shouldSync 过滤） */
   listLocalFiles(): string[] {
+    const cfg = this.app.vault.configDir;
     return this.app.vault
       .getMarkdownFiles()
       .map((f) => normalizeVaultPath(f.path))
-      .filter(shouldSync);
+      .filter((p) => shouldSync(p, cfg));
   }
 
   /** GET /files → { items } → path→meta */
   async fetchRemoteFiles(): Promise<SyncMetaMap> {
-    const res = await axios.get(this.baseUrl + '/files', {
+    const res = await syncHttpRequest({
+      url: this.baseUrl + '/files',
       headers: this.syncApiHeaders(),
-      responseType: 'text',
-      ...AXIOS_TIMEOUT_DEFAULTS,
+      timeoutMs: HTTP_TIMEOUT_MS,
     });
-    const raw = res.data as unknown;
-
-    if (typeof raw !== 'string') {
-      throw new Error('/files 响应类型异常');
-    }
-    const s = raw.trim();
+    if (res.status >= 400) throw httpErrorFromResponse(res);
+    const s = res.text.trim();
     if (s === '') {
       throw new Error('/files 空响应');
     }
@@ -1926,7 +2035,7 @@ export default class ObsidianSyncPlugin extends Plugin {
       throw new Error('/files 响应不是合法 JSON');
     }
 
-    const remoteFiles = parseRemoteFilesItems(data);
+    const remoteFiles = parseRemoteFilesItems(data, this.app.vault.configDir);
 
     return remoteFiles;
   }
@@ -1951,36 +2060,44 @@ export default class ObsidianSyncPlugin extends Plugin {
       const cipher_size = wire.length;
 
       const updated_at = Date.now();
-      const form = new FormData();
       const basename = normalized.includes('/')
         ? normalized.slice(normalized.lastIndexOf('/') + 1)
         : normalized;
-      form.append(
-        'file',
-        new Blob([wire], { type: 'application/octet-stream' }),
-        basename || 'file',
+      const mp = buildMultipartFormData(
+        {
+          relative_path: normalized,
+          updated_at: String(updated_at),
+          cipher_hash,
+          cipher_size: String(cipher_size),
+          encryption_version: String(ENCRYPTION_VERSION_WIRE),
+          vault_key_version: String(this.vaultKeyVersion),
+        },
+        {
+          fieldName: 'file',
+          filename: basename || 'file',
+          contentType: 'application/octet-stream',
+          data: wire,
+        },
       );
-      form.append('relative_path', normalized);
-      form.append('updated_at', String(updated_at));
-      form.append('cipher_hash', cipher_hash);
-      form.append('cipher_size', String(cipher_size));
-      form.append('encryption_version', String(ENCRYPTION_VERSION_WIRE));
-      form.append('vault_key_version', String(this.vaultKeyVersion));
 
-      const uploadRes = await axios.post<{
-        success?: boolean;
-        relative_path?: string;
-        updated_at?: number;
-        cipher_hash?: string;
-        cipher_size?: number;
-        encryption_version?: number;
-        vault_key_version?: number;
-      }>(this.baseUrl + '/upload', form, {
+      const uploadResRaw = await syncHttpRequest({
+        url: this.baseUrl + '/upload',
+        method: 'POST',
         headers: this.syncApiHeaders(),
-        ...AXIOS_LARGE_FILE_DEFAULTS,
+        body: mp.body,
+        contentType: mp.contentType,
+        timeoutMs: HTTP_TRANSFER_TIMEOUT_MS,
       });
-
-      const d = uploadRes.data;
+      if (uploadResRaw.status >= 400) throw httpErrorFromResponse(uploadResRaw);
+      let d: unknown;
+      try {
+        d = JSON.parse(uploadResRaw.text) as unknown;
+      } catch {
+        throw new Error('上传响应不是合法 JSON');
+      }
+      if (!isPlainObjectRecord(d)) {
+        throw new Error('上传响应字段不完整或 success 非 true');
+      }
       if (
         d.success !== true ||
         typeof d.cipher_hash !== 'string' ||
@@ -2017,15 +2134,15 @@ export default class ObsidianSyncPlugin extends Plugin {
       if (remote.encryption_version !== ENCRYPTION_VERSION_WIRE) {
         throw new Error(`不支持的 encryption_version:${remote.encryption_version}`);
       }
-      const res = await axios.get(this.baseUrl + '/download', {
-        params: { relative_path: normalized },
+      const res = await syncHttpRequest({
+        url: appendQueryUrl(this.baseUrl + '/download', { relative_path: normalized }),
         headers: this.syncApiHeaders(),
-        responseType: 'arraybuffer',
-        ...AXIOS_LARGE_FILE_DEFAULTS,
+        timeoutMs: HTTP_TRANSFER_TIMEOUT_MS,
       });
+      if (res.status >= 400) throw httpErrorFromResponse(res);
 
-      const buf = httpResponseBodyToArrayBuffer(res.data);
-      assertDownloadWireResponse(buf, res.headers['content-type']);
+      const buf = httpResponseBodyToArrayBuffer(res.arrayBuffer);
+      assertDownloadWireResponse(buf, headerGet(res.headers, 'content-type'));
 
       const plainBuf = await decryptWireToPlain(
         new Uint8Array(buf),
@@ -2055,7 +2172,7 @@ export default class ObsidianSyncPlugin extends Plugin {
         plain_fingerprint: plainFp,
       };
     } catch (err) {
-      if (isAxiosError(err) && err.response?.status === 404) {
+      if (isHttpRequestError(err) && err.status === 404) {
         throw new Error(`下载失败：远端无此文件 (HTTP 404) · ${normalized}`);
       }
       console.error('[HailySync] download failed:', normalized, err);
@@ -2071,14 +2188,14 @@ export default class ObsidianSyncPlugin extends Plugin {
       throw new Error(`不支持的 encryption_version:${remote.encryption_version}`);
     }
     try {
-      const res = await axios.get(this.baseUrl + '/download', {
-        params: { relative_path: normalized },
+      const res = await syncHttpRequest({
+        url: appendQueryUrl(this.baseUrl + '/download', { relative_path: normalized }),
         headers: this.syncApiHeaders(),
-        responseType: 'arraybuffer',
-        ...AXIOS_LARGE_FILE_DEFAULTS,
+        timeoutMs: HTTP_TRANSFER_TIMEOUT_MS,
       });
-      const buf = httpResponseBodyToArrayBuffer(res.data);
-      assertDownloadWireResponse(buf, res.headers['content-type']);
+      if (res.status >= 400) throw httpErrorFromResponse(res);
+      const buf = httpResponseBodyToArrayBuffer(res.arrayBuffer);
+      assertDownloadWireResponse(buf, headerGet(res.headers, 'content-type'));
       const plainBuf = await decryptWireToPlain(
         new Uint8Array(buf),
         normalized,
@@ -2095,7 +2212,7 @@ export default class ObsidianSyncPlugin extends Plugin {
         await this.app.vault.create(conflictPath, content);
       }
     } catch (err) {
-      if (isAxiosError(err) && err.response?.status === 404) {
+      if (isHttpRequestError(err) && err.status === 404) {
         throw new Error(`冲突副本下载失败：远端无此文件 (HTTP 404) · ${normalized}`);
       }
       throw err;
@@ -2105,20 +2222,35 @@ export default class ObsidianSyncPlugin extends Plugin {
   async postDeleteRemote(filePath: string): Promise<void> {
     const normalized = normalizeVaultPath(filePath);
     const updated_at = Date.now();
-    const res = await axios.post<{
-      success?: boolean;
-      relative_path?: string;
-      updated_at?: number;
-    }>(
-      this.baseUrl + '/delete',
-      {
+    const res = await syncHttpRequest({
+      url: this.baseUrl + '/delete',
+      method: 'POST',
+      headers: this.syncApiHeaders(),
+      contentType: 'application/json',
+      body: JSON.stringify({
         relative_path: normalized,
         updated_at,
-      },
-      { headers: this.syncApiHeaders(), ...AXIOS_TIMEOUT_DEFAULTS },
-    );
-    const d = res.data;
-    if (d.success !== true || d.relative_path !== normalized || typeof d.updated_at !== 'number') {
+      }),
+      timeoutMs: HTTP_TIMEOUT_MS,
+    });
+    if (res.status >= 400) throw httpErrorFromResponse(res);
+    let d: unknown;
+    try {
+      d = JSON.parse(res.text) as unknown;
+    } catch {
+      throw new Error('删除响应不符合冻结协议（success / relative_path / updated_at）');
+    }
+    if (!isPlainObjectRecord(d)) {
+      throw new Error('删除响应不符合冻结协议（success / relative_path / updated_at）');
+    }
+    const ok = d.success;
+    const rp = d.relative_path;
+    const ua = d.updated_at;
+    if (
+      ok !== true ||
+      rp !== normalized ||
+      typeof ua !== 'number'
+    ) {
       throw new Error('删除响应不符合冻结协议（success / relative_path / updated_at）');
     }
   }
@@ -2127,7 +2259,7 @@ export default class ObsidianSyncPlugin extends Plugin {
     const normalized = normalizeVaultPath(path);
     const f = this.app.vault.getAbstractFileByPath(normalized);
     if (f instanceof TFile) {
-      await this.app.vault.delete(f);
+      await this.app.fileManager.trashFile(f);
     }
   }
 
@@ -2204,8 +2336,9 @@ export default class ObsidianSyncPlugin extends Plugin {
       new Notice('正在同步…');
 
       const meta = await this.loadMeta();
+      const vaultCfg = this.app.vault.configDir;
       for (const k of Object.keys(meta)) {
-        if (!shouldSync(k)) delete meta[k];
+        if (!shouldSync(k, vaultCfg)) delete meta[k];
       }
 
       let remote: SyncMetaMap;
@@ -2234,13 +2367,13 @@ export default class ObsidianSyncPlugin extends Plugin {
       const localPaths = this.listLocalFiles();
       const pathSet = new Set<string>();
       for (const p of localPaths) {
-        if (shouldSync(p)) pathSet.add(normalizeVaultPath(p));
+        if (shouldSync(p, vaultCfg)) pathSet.add(normalizeVaultPath(p));
       }
       for (const k of Object.keys(meta)) {
-        if (shouldSync(k)) pathSet.add(normalizeVaultPath(k));
+        if (shouldSync(k, vaultCfg)) pathSet.add(normalizeVaultPath(k));
       }
       for (const k of Object.keys(remote)) {
-        if (shouldSync(k)) pathSet.add(normalizeVaultPath(k));
+        if (shouldSync(k, vaultCfg)) pathSet.add(normalizeVaultPath(k));
       }
 
       const sortedPaths = [...pathSet].sort();

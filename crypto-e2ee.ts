@@ -221,7 +221,7 @@ export async function decryptWireToPlain(
   const encVer = dv.getUint16(o, false);
   o += 2;
   if (encVer !== ENCRYPTION_VERSION_WIRE) throw new Error(`E2EE_WIRE_ENC_VERSION:${encVer}`);
-  const vaultKeyVersion = dv.getUint32(o, false);
+  void dv.getUint32(o, false);
   o += 4;
   const nonce = wire.slice(o, o + 12);
   o += 12;

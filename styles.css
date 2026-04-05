@@ -7,17 +7,17 @@
 	box-sizing: border-box;
 }
 
-.hailysync-settings-title {
-	margin: 0;
-	padding: 0;
+/* 设置页首行：与 Obsidian Setting#setHeading() 生成的结构对齐 */
+.hailysync-container > .setting-item.setting-item-heading {
+	margin-top: 0;
+	margin-bottom: 12px;
+	padding-top: 0;
 }
 
-.hailysync-settings-title h2 {
+.hailysync-container > .setting-item.setting-item-heading .setting-item-name {
 	font-size: 20px;
 	font-weight: 600;
 	line-height: 1.35;
-	margin-top: 0;
-	margin-bottom: 12px;
 	letter-spacing: 0.01em;
 }
 
