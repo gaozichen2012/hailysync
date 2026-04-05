@@ -3312,11 +3312,11 @@ function formatSyncError(err) {
   if (err instanceof Error && err.message) return err.message;
   return String(err);
 }
-var ConfirmModal = class extends import_obsidian2.Modal {
-  constructor(app, message, onConfirm) {
+var PromptModal = class extends import_obsidian2.Modal {
+  constructor(app, message, onAccept) {
     super(app);
     this.message = message;
-    this.onConfirm = onConfirm;
+    this.onAccept = onAccept;
   }
   onOpen() {
     const { contentEl } = this;
@@ -3326,7 +3326,7 @@ var ConfirmModal = class extends import_obsidian2.Modal {
     btns.createEl("button", { text: "\u53D6\u6D88" }).addEventListener("click", () => this.close());
     btns.createEl("button", { text: "\u786E\u5B9A", cls: "mod-cta" }).addEventListener("click", () => {
       this.close();
-      this.onConfirm();
+      this.onAccept();
     });
   }
 };
@@ -3609,15 +3609,15 @@ var HailySyncSettingTab = class extends import_obsidian2.PluginSettingTab {
       new import_obsidian2.Notice("\u8BF7\u5148\u5B8C\u6210\u8FDE\u63A5\u540E\u518D\u8BD5");
       return;
     }
-    new ConfirmModal(
+    new PromptModal(
       this.app,
       "\u91CD\u7F6E\u540E\uFF0C\u65E7\u7684\u8BBE\u5907\u7ED1\u5B9A\u7801\u5C06\u7ACB\u5373\u5931\u6548\uFF0C\u5176\u4ED6\u8BBE\u5907\u9700\u4F7F\u7528\u65B0\u7ED1\u5B9A\u7801\u624D\u80FD\u7EE7\u7EED\u8FDE\u63A5\u3002\n\n\u786E\u5B9A\u8981\u91CD\u7F6E\u5417\uFF1F",
       () => {
-        void this.runResetBindingAfterConfirm();
+        void this.runAfterResetBindingAccepted();
       }
     ).open();
   }
-  async runResetBindingAfterConfirm() {
+  async runAfterResetBindingAccepted() {
     this.clearBindingTimers();
     this.revealedFullCode = null;
     this.revealExpireAt = null;
@@ -3691,7 +3691,7 @@ var HailySyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         btn.type = "button";
         btn.addEventListener("click", () => {
           const label = (d.device_name || "\u8BE5\u8BBE\u5907").trim() || "\u8BE5\u8BBE\u5907";
-          new ConfirmModal(
+          new PromptModal(
             this.app,
             `\u79FB\u9664\u540E\uFF0C\u8BE5\u8BBE\u5907\u5C06\u65E0\u6CD5\u7EE7\u7EED\u540C\u6B65\uFF0C\u9700\u91CD\u65B0\u8F93\u5165\u8BBE\u5907\u7ED1\u5B9A\u7801\u624D\u80FD\u8FDE\u63A5\u3002
 

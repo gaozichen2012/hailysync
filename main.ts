@@ -521,11 +521,11 @@ function formatSyncError(err: unknown): string {
   return String(err);
 }
 
-class ConfirmModal extends Modal {
+class PromptModal extends Modal {
   constructor(
     app: App,
     private readonly message: string,
-    private readonly onConfirm: () => void,
+    private readonly onAccept: () => void,
   ) {
     super(app);
   }
@@ -540,7 +540,7 @@ class ConfirmModal extends Modal {
       .createEl('button', { text: '确定', cls: 'mod-cta' })
       .addEventListener('click', () => {
         this.close();
-        this.onConfirm();
+        this.onAccept();
       });
   }
 }
@@ -869,16 +869,16 @@ class HailySyncSettingTab extends PluginSettingTab {
       new Notice('请先完成连接后再试');
       return;
     }
-    new ConfirmModal(
+    new PromptModal(
       this.app,
       '重置后，旧的设备绑定码将立即失效，其他设备需使用新绑定码才能继续连接。\n\n确定要重置吗？',
       () => {
-        void this.runResetBindingAfterConfirm();
+        void this.runAfterResetBindingAccepted();
       },
     ).open();
   }
 
-  private async runResetBindingAfterConfirm(): Promise<void> {
+  private async runAfterResetBindingAccepted(): Promise<void> {
     this.clearBindingTimers();
     this.revealedFullCode = null;
     this.revealExpireAt = null;
@@ -960,7 +960,7 @@ class HailySyncSettingTab extends PluginSettingTab {
         btn.type = 'button';
         btn.addEventListener('click', () => {
           const label = (d.device_name || '该设备').trim() || '该设备';
-          new ConfirmModal(
+          new PromptModal(
             this.app,
             `移除后，该设备将无法继续同步，需重新输入设备绑定码才能连接。\n\n确定移除「${label}」吗？`,
             () => {
